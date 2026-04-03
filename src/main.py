@@ -2,10 +2,11 @@
 Main entry point for the Quant-Core-Template engine.
 Utilizes standard logging library for production-grade event tracking.
 """
-
-import os
+import sys
 import logging
-from dotenv import load_dotenv
+
+from core.wallet import WalletManager
+
 
 # Logging configuration: Timestamp | Level | Message
 logging.basicConfig(
@@ -16,44 +17,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def initialize_engine():
-    """
-    Load environment variables and prepare configuration.
-    """
-    load_dotenv()
-
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    config = {
-        "api_key": api_key,
-    }
-    return config
-
-
 def main():
     logger.info("Engine initialization started")
 
     try:
-        config = initialize_engine()
-        openai_api_key = config["api_key"]
+        wallet = WalletManager.from_env()
+        logger.info(f"Wallet loaded: {wallet.address}")
+    except Exception as err:
+        logger.error(f"❌ Critical error ❌: could not load wallet from environment: {err}")
+        sys.exit(1)
 
-        if openai_api_key:
-            # Masking API key for logs to prevent accidental exposure
-            masked_key = f"{openai_api_key[:6]}****"
-            logger.info(f"OpenAI service: key detected "
-                        f"and loaded ({masked_key})")
-        else:
-            # Non-blocking warning
-            logger.warning(
-                "OpenAI Service: API key is missing. "
-                "AI features will be unavailable."
-            )
-
-        logger.info("Engine is now running")
-
-    except Exception as error:
-        logger.critical(f"Critical failure during "
-                        f"startup: {error}", exc_info=True)
+    logger.info("Engine is now running")
 
 
 if __name__ == "__main__":

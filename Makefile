@@ -1,5 +1,5 @@
 # .PHONY ensures that these targets do not conflict with files of the same name
-.PHONY: init build run test lint format check clean
+.PHONY: init build run test integration lint format check clean
 
 DOCKER_COMPOSE = docker compose
 APP_RUN = $(DOCKER_COMPOSE) run --rm app
@@ -22,8 +22,11 @@ run:
 test:
 	$(APP_RUN) pytest tests/
 
+integration:
+	$(APP_RUN) python3 -m scripts.integration_test
+
 lint:
-	$(APP_RUN) flake8 src/ tests/
+	$(APP_RUN) flake8 src/ tests/ scripts/
 
 check: lint test
 

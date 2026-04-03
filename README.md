@@ -1,9 +1,10 @@
 # Quant-Core-Template
 
-A high-integrity engineering baseline for a trading engine, featuring multi-chain address 
-validation (BTC & ETH). Built with Python 3.11, Docker, and Make.
+A high-integrity engineering baseline for a trading engine, featuring multi-chain support,
+cryptographic security checks, and automated infrastructure.
 
-Supports Bitcoin (P2PKH, P2WPKH, P2TR) and Ethereum address formats.
+This template provides a robust foundation for building decentralized finance
+applications and trading bots with a focus on type safety and reliability.
 
 ## 🚀 Prerequisites 🚀
 
@@ -23,8 +24,8 @@ git clone https://github.com/Braun-Alex/quant-core-template.git
 ```bash
 cp .env.example .env
 ```
-
-Optional: open ```.env``` and add your ```OPENAI_API_KEY``` to enable AI features.
+Open ```.env``` and add your ```PRIVATE_KEY``` to enable blockchain interactions.
+```SEPOLIA_RPC_URL``` is required to run integration test.
 
 3. Initialize the project:
 ```make
@@ -43,12 +44,33 @@ make build
 make run
 ```
 
-2. Running tests:
+2. Execute unit tests:
 ```make
 make test
 ```
 
-3. To check the code:
+3. To check the code for style and syntax issues using ```flake8```:
+```make
+make lint
+```
+
+4. Full quality check:
+```make
+make check
+```
+
+## 🚀 Integration Testing 🚀
+
+The project includes a comprehensive integration test that
+simulates a real-world workflow on the Sepolia Testnet.
+
+1. Loads wallet from environment.
+2. Validates network connectivity and balance.
+3. Builds and estimates a transaction.
+4. Performs local cryptographic recovery to verify the signature.
+5. Broadcasts to the network and monitors for block confirmation.
+
+To run the integration test:
 ```make
 make lint
 ```
