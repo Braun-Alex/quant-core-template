@@ -1,7 +1,6 @@
 # Quant-Core-Template
 
-A high-integrity engineering baseline for a trading engine, featuring multi-chain support,
-cryptographic security checks, and automated infrastructure.
+A high-integrity engineering baseline for a trading engine.
 
 This template provides a robust foundation for building decentralized finance
 applications and trading bots with a focus on type safety and reliability.
@@ -59,6 +58,16 @@ make lint
 make check
 ```
 
+5. To start local Anvil fork of Ethereum mainnet:
+```make
+make fork
+```
+
+6. To stop only the Anvil service:
+```make
+make stop-fork
+```
+
 ## 🚀 Integration Testing 🚀
 
 The project includes a comprehensive integration test that
@@ -72,5 +81,5 @@ simulates a real-world workflow on the Sepolia Testnet.
 
 To run the integration test:
 ```make
-make lint
+make integration
 ```

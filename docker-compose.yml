@@ -1,9 +1,48 @@
 services:
+  # Local Ethereum mainnet fork using Anvil
+  anvil:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: anvil-fork
+    ports:
+      - "8545:8545"
+    environment:
+      - ETH_RPC_URL=${ETH_RPC_URL:?ETH_RPC_URL must be set in .env}
+      - FORK_PORT=8545
+      - FORK_BLOCK=${FORK_BLOCK}
+      - FORK_ACCOUNTS=${FORK_ACCOUNTS}
+      - FORK_BALANCE=${FORK_BALANCE}
+    command: >
+      anvil
+        --fork-url "${ETH_RPC_URL}"
+        --port "${FORK_PORT}"
+        --accounts "${FORK_ACCOUNTS}"
+        --balance "${FORK_BALANCE}"
+        --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  # Main application service
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-app
+    depends_on:
+      anvil:
+        condition: service_healthy
     volumes:
       - .:/app
     env_file:
       - .env
+    environment:
+      # Application connects to the local Anvil fork via Docker network
+      - ETH_RPC_URL=http://anvil:8545
     stdin_open: true
     tty: true
