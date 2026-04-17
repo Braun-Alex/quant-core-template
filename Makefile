@@ -57,11 +57,33 @@ check: lint test
 
 # Price impact analysis example
 impact:
-	$(APP_RUN) python -m src.pricing.impact_analyzer \
+	$(APP_RUN) python3 -m src.pricing.impact_analyzer \
 		0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc \
-		--token-in USDC \
-		--sizes 1000,10000,100000 \
+		--sell USDC \
+		--amounts 1000,10000,100000,1000000,3000000,9000000 \
 		--rpc http://anvil:8545
+
+# Live Binance testnet order book snapshot example
+orderbook:
+	$(APP_RUN) python3 -m src.exchange.orderbook \
+		"ETH/USDT" \
+		--depth 30
+
+# Cross-venue rebalance checker
+check-rebalance:
+	$(APP_RUN) python3 -m src.inventory.rebalancer --check
+
+# Cross-venue rebalance planner
+plan-rebalance:
+	$(APP_RUN) python3 -m src.inventory.rebalancer --plan-all
+
+# Arbitrage trade dashboard
+pnl:
+	$(APP_RUN) python3 -m src.inventory.pnl --summary
+
+# Arbitrage checker
+check-arb:
+	$(APP_RUN) python3 -m src.inventory.arb_checker "ETH/USDT" --size 3.0
 
 # ====================== Cleanup ======================
 

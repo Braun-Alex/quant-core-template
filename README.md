@@ -2,8 +2,9 @@
 
 A high-integrity engineering baseline for a trading engine.
 
-This template provides a robust foundation for building decentralized finance
-applications and trading bots with a focus on type safety and reliability.
+This template provides a robust foundation for building high-performance trading systems,
+cross-venue inventory management, arbitrage bots and DeFi applications
+with strong focus on type safety, reliability and observability.
 
 ## 🚀 Prerequisites 🚀
 
@@ -38,34 +39,46 @@ make build
 
 ## 🚀 Usage 🚀
 
-1. Running the engine:
-```make
-make run
+### Core Commands
+
+| Command                  | Description                                      |
+|--------------------------|--------------------------------------------------|
+| `make up`                | Start all services in detached mode              |
+| `make down`              | Stop all services                                |
+| `make logs`              | Follow logs of all services                      |
+| `make run`               | Start services and follow app logs               |
+
+### Development & Testing
+
+```bash
+make test           # Run unit tests
+make lint           # Run flake8 linting
+make check          # Full quality check (lint + test)
+make clean          # Cleanup caches and containers
+````
+
+
+### Anvil Fork (Local Ethereum Mainnet)
+
+```bash
+make fork           # Start local Anvil fork
+make stop-fork      # Stop only Anvil service
 ```
 
-2. Execute unit tests:
-```make
-make test
+### Inventory & Rebalancing Tools
+
+```bash
+make check-rebalance    # Show current cross-venue skew report
+make plan-rebalance     # Generate rebalance plans for all unbalanced assets
 ```
 
-3. To check the code for style and syntax issues using ```flake8```:
-```make
-make lint
-```
+### Arbitrage & Trading Tools
 
-4. Full quality check:
-```make
-make check
-```
-
-5. To start local Anvil fork of Ethereum mainnet:
-```make
-make fork
-```
-
-6. To stop only the Anvil service:
-```make
-make stop-fork
+```bash
+make check-arb          # Check arbitrage opportunity for ETH/USDT
+make pnl                # Show position & PnL summary
+make orderbook          # Live Binance testnet order book snapshot
+make impact             # Price impact analysis on Uniswap V2 pool`
 ```
 
 ## 🚀 Integration Testing 🚀
