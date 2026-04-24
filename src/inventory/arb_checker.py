@@ -9,7 +9,7 @@ Connects:
 
 Returns a structured assessment dict - does NOT execute any trades.
 
-CLI::
+CLI:
     python3 -m src.integration.arb_checker ETH/USDT --size 2.0
     python3 -m src.integration.arb_checker ETH/USDT --size 2.0 --dex-price 2003.19
 """
@@ -305,7 +305,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
     inventory = VenueTracker([Venue.BINANCE, Venue.WALLET])
     inventory.update_from_cex(
         Venue.BINANCE,
-        {base: {"free": "300", "locked": "0"}, quote: {"free": "1500000", "locked": "0"}},
+        {base: {"free": "300", "locked": "0"}, quote: {"free": "1500000", "locked": "0"}}
     )
     inventory.update_from_wallet(Venue.WALLET, {base: "300", quote: "1500000"})
 

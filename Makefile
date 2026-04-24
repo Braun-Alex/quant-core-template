@@ -47,8 +47,11 @@ run: up
 test:
 	$(APP_RUN) pytest tests/
 
+test-bot:
+	$(APP_RUN) pytest scripts/test_bot.py
+
 integration:
-	$(APP_RUN) python -m scripts.integration_test
+	$(APP_RUN) python3 -m scripts.integration_test
 
 lint:
 	$(APP_RUN) flake8 src/ tests/ scripts/
@@ -63,11 +66,9 @@ impact:
 		--amounts 1000,10000,100000,1000000,3000000,9000000 \
 		--rpc http://anvil:8545
 
-# Live Binance testnet order book snapshot example
+# Live Binance Testnet order book snapshot example
 orderbook:
-	$(APP_RUN) python3 -m src.exchange.orderbook \
-		"ETH/USDT" \
-		--depth 30
+	$(APP_RUN) python3 -m src.exchange.orderbook "ETH/USDT" --depth 30
 
 # Cross-venue rebalance checker
 check-rebalance:

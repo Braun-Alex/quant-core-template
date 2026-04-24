@@ -1,5 +1,6 @@
 web3
 ccxt
+openai
 eth-account
 eth-abi
 eth-hash
@@ -9,3 +10,4 @@ pytest
 pytest-asyncio
 flake8
 pydantic
+numpy

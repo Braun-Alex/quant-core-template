@@ -52,6 +52,7 @@ make build
 
 ```bash
 make test           # Run unit tests
+make test-bot       # Run integration tests for bot
 make lint           # Run flake8 linting
 make check          # Full quality check (lint + test)
 make clean          # Cleanup caches and containers
