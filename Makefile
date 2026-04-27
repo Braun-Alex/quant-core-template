@@ -38,6 +38,24 @@ fork:
 stop-fork:
 	$(DOCKER_COMPOSE) stop anvil
 
+# ====================== Mode helpers ======================
+
+# Print current operation mode
+show-mode:
+	@grep -E '^OPERATION_MODE' .env 2>/dev/null || echo "OPERATION_MODE not set (defaults to test)"
+
+# Switch to test mode
+test-mode:
+	@sed -i 's/^OPERATION_MODE=.*/OPERATION_MODE=test/' .env 2>/dev/null || \
+		echo "OPERATION_MODE=test" >> .env
+	@echo "Switched to TEST mode (Binance Testnet and Ethereum Mainnet dry-run)"
+
+# Switch to production mode (use with caution)
+prod-mode:
+	@sed -i 's/^OPERATION_MODE=.*/OPERATION_MODE=production/' .env 2>/dev/null || \
+		echo "OPERATION_MODE=production" >> .env
+	@echo "Switched to PRODUCTION mode (Binance Mainnet and Ethereum Mainnet live)"
+
 # ====================== Application commands ======================
 
 # Run the main application
@@ -50,8 +68,20 @@ test:
 test-bot:
 	$(APP_RUN) pytest scripts/test_bot.py
 
-integration:
-	$(APP_RUN) python3 -m scripts.integration_test
+# Sepolia blockchain integration test
+transfer-integration:
+	$(APP_RUN) python3 -m scripts.transfer_integration_test
+
+# Testnet bot integration test: Binance Testnet and Ethereum Mainnet (test mode = dry-run)
+bot-integration-testnet:
+	$(APP_RUN) env OPERATION_MODE=test python3 -m scripts.bot_integration_test
+
+# Mainnet bot integration test: requires funded wallet and mainnet credentials
+bot-integration-mainnet:
+	$(APP_RUN) env OPERATION_MODE=production python3 -m scripts.bot_integration_test
+
+run-bot:
+	$(APP_RUN) python3 -m scripts.arb_bot
 
 lint:
 	$(APP_RUN) flake8 src/ tests/ scripts/
