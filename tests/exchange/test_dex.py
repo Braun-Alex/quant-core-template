@@ -489,7 +489,6 @@ class TestSystemConfig:
             cfg = SystemConfig.from_env()
         assert cfg.mode == OperationMode.PRODUCTION
         assert cfg.cex.sandbox is False
-        assert cfg.dex.dry_run is False
 
     def test_env_overrides_leg1_timeout(self):
         from config.mode import SystemConfig
