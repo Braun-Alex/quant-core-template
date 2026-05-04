@@ -34,10 +34,8 @@ class BotHealth:
     last_heartbeat: float = 0.0
     last_trade_time: float = 0.0
 
-    cex_connected: bool = False
     cex_last_response_ms: float = 0.0
 
-    dex_connected: bool = False
     dex_last_response_ms: float = 0.0
 
     current_capital: float = 0.0
@@ -52,12 +50,10 @@ class BotHealth:
     def log_health(self) -> None:
         log.info(
             "BOT_HEALTH | running=%s capital=$%.2f daily_pnl=$%.2f "
-            "drawdown=%.1f%% cex=%s dex=%s errors_1h=%d trades_1h=%d "
+            "drawdown=%.1f%% errors_1h=%d trades_1h=%d "
             "cb_open=%s kill=%s",
             self.is_running, self.current_capital, self.daily_pnl,
             self.drawdown_pct * 100,
-            "OK" if self.cex_connected else "DOWN",
-            "OK" if self.dex_connected else "DOWN",
             self.error_count_1h, self.trades_count_1h,
             self.circuit_breaker_open, self.kill_switch_active
         )

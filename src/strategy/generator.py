@@ -1,5 +1,9 @@
 """
 Bayesian Kalman Spread Estimator.
+
+Fetches CEX prices from BinanceClient and DEX prices from DEXPriceSource
+(real on-chain data via Uniswap V2 pools). Falls back to mid-price
+approximation when no DEX source is available.
 """
 
 from __future__ import annotations
@@ -13,6 +17,12 @@ from decimal import Decimal, getcontext, ROUND_HALF_EVEN
 from typing import Optional
 
 from src.strategy.signal import Direction, KalmanState, Signal
+
+# Optional import - only used when PriceFeedManager is connected
+try:
+    from src.exchange.price_feed import PriceState
+except ImportError:
+    PriceState = None
 
 getcontext().prec = 28
 getcontext().rounding = ROUND_HALF_EVEN
@@ -52,7 +62,7 @@ class FeeStructure:
 
 
 # ---------------------------------------------------------------------------
-# Kalman filter (unchanged logic, same as original)
+# Kalman filter
 # ---------------------------------------------------------------------------
 
 class KalmanSpreadFilter:
@@ -170,8 +180,8 @@ class SignalGeneratorConfig:
     init_R: Decimal = Decimal("1E-4")
     anomaly_zscore_threshold: Decimal = Decimal("3")
     # DEX price offset applied in simulation / fallback mode (fraction)
-    dex_premium_fraction: Decimal = Decimal("0.003")   # 0.3 % above mid
-    dex_discount_fraction: Decimal = Decimal("0.006")   # 0.6 % below mid for sale
+    dex_premium_fraction: Decimal = Decimal("0.003")   # 0.3% above mid
+    dex_discount_fraction: Decimal = Decimal("0.006")   # 0.6% below mid for sale
 
     def __post_init__(self) -> None:
         for f in (
@@ -200,7 +210,7 @@ class SignalGenerator:
         inventory_tracker,
         fee_structure: FeeStructure,
         config: Optional[SignalGeneratorConfig] = None,
-        dex_price_source=None,   # DEXPriceSource instance (optional)
+        dex_price_source=None   # DEXPriceSource instance (optional)
     ) -> None:
         self._exchange = exchange_client
         self._pricing = pricing_engine
@@ -211,6 +221,8 @@ class SignalGenerator:
 
         self._filters: dict[str, KalmanSpreadFilter] = {}
         self._last_signal_time: dict[str, Decimal] = {}
+        # Injected by ArbBot when WebSocket feeds are active
+        self._price_feed_manager = None
 
     # ------------------------------------------------------------------
     # Public
@@ -225,7 +237,78 @@ class SignalGenerator:
         prices = self._fetch_prices(pair, size)
         if prices is None:
             return None
+        return self._generate_from_prices(pair, size, prices)
 
+    def get_filter_state(self, pair: str) -> Optional[KalmanState]:
+        return self._filters[pair].state if pair in self._filters else None
+
+    # ------------------------------------------------------------------
+    # Feed-driven generation (event-based, no REST call)
+    # ------------------------------------------------------------------
+
+    def generate_from_feed(
+        self, pair: str, size, price_state
+    ) -> Optional[Signal]:
+        """
+        Generate a signal using prices already in ``price_state``
+        (from PriceFeedManager) instead of making a REST call.
+
+        Called reactively on every CEX/DEX price update.
+
+        Parameters
+        ----------
+        pair        : trading pair, e.g. "ETH/USDC"
+        size        : trade size in base-asset units
+        price_state : PriceState from PriceFeedManager
+        """
+        size = Decimal(str(size))
+
+        if self._in_cooldown(pair):
+            return None
+
+        if not price_state.is_valid:
+            return None
+
+        cex_bid = price_state.cex_bid
+        cex_ask = price_state.cex_ask
+        dex_price = price_state.dex_price
+
+        if cex_bid <= _ZERO or cex_ask <= _ZERO or dex_price <= _ZERO:
+            return None
+
+        # For Uniswap V2: marginal price = reserves_quote / reserves_base
+        # dex_buy  = price to buy base on DEX (DEX ask-side)
+        # dex_sell = price to sell base on DEX (DEX bid-side, ≈ dex_price × (1-fee))
+        fee_factor = _ONE - Decimal(str(price_state.dex_fee_bps)) / _TEN_THOU
+        dex_sell = dex_price * fee_factor   # What DEX pays when we sell base
+        dex_buy = dex_price / fee_factor   # What DEX charges when we buy base
+
+        prices = {
+            "cex_bid": cex_bid,
+            "cex_ask": cex_ask,
+            "dex_buy": dex_buy,
+            "dex_sell": dex_sell
+        }
+
+        log.debug(
+            "[FEED] %s cex_bid=%.4f cex_ask=%.4f dex=%.4f dex_buy=%.4f dex_sell=%.4f",
+            pair, float(cex_bid), float(cex_ask), float(dex_price),
+            float(dex_buy), float(dex_sell)
+        )
+
+        return self._generate_from_prices(pair, size, prices)
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    def _generate_from_prices(
+        self, pair: str, size: Decimal, prices: dict
+    ) -> Optional[Signal]:
+        """
+        Core signal generation logic shared by generate() and generate_from_feed().
+        ``prices`` must have keys: cex_bid, cex_ask, dex_buy, dex_sell.
+        """
         cex_bid = prices["cex_bid"]
         cex_ask = prices["cex_ask"]
         dex_buy = prices["dex_buy"]
@@ -288,32 +371,19 @@ class SignalGenerator:
         within_limits = actual_trade_value <= self._cfg.max_position_usd
 
         sig = Signal.create(
-            pair=pair,
-            direction=direction,
-            cex_price=ref_cex,
-            dex_price=ref_dex,
-            raw_spread_bps=raw_spread_bps,
-            filtered_spread=mu,
+            pair=pair, direction=direction,
+            cex_price=ref_cex, dex_price=ref_dex,
+            raw_spread_bps=raw_spread_bps, filtered_spread=mu,
             posterior_variance=state.variance,
             signal_confidence=confidence,
-            kelly_size=kelly_size,
-            expected_net_pnl=net_pnl,
+            kelly_size=kelly_size, expected_net_pnl=net_pnl,
             ttl_seconds=self._cfg.signal_ttl_seconds,
-            inventory_ok=inventory_ok,
-            within_limits=within_limits,
-            innovation_zscore=zscore,
-            kalman_state=state
+            inventory_ok=inventory_ok, within_limits=within_limits,
+            innovation_zscore=zscore, kalman_state=state
         )
 
         self._last_signal_time[pair] = Decimal(str(time.time()))
         return sig
-
-    def get_filter_state(self, pair: str) -> Optional[KalmanState]:
-        return self._filters[pair].state if pair in self._filters else None
-
-    # ------------------------------------------------------------------
-    # Private
-    # ------------------------------------------------------------------
 
     def _get_or_create_filter(self, pair: str) -> KalmanSpreadFilter:
         if pair not in self._filters:
@@ -341,7 +411,12 @@ class SignalGenerator:
 
     def _fetch_prices(self, pair: str, size: Decimal) -> Optional[dict[str, Decimal]]:
         """
-        Fetch prices from CEX and DEX.
+        Fetch prices from CEX + DEX.
+
+        Priority:
+          1. Real DEX quote from dex_price_source
+          2. PricingEngine routing quote
+          3. CEX mid ± configurable offset (fallback)
         """
         try:
             ob = self._exchange.fetch_order_book(pair)
@@ -366,9 +441,9 @@ class SignalGenerator:
                 # dex_buy = how many quote tokens per 1 base (buying base on DEX)
                 # dex_sell = how many quote tokens per 1 base (selling base on DEX)
                 if dex_buy_price > _ZERO and dex_sell_price > _ZERO:
-                    # Buy quote: dex_data_buy["price"] = quote per base
-                    # Sell base: dex_data_sell["price"] = base per quote → invert
-                    dex_buy = dex_buy_price   # price to buy base with quote
+                    # buy quote: dex_data_buy["price"] = quote per base
+                    # sell base: dex_data_sell["price"] = base per quote → invert
+                    dex_buy = dex_buy_price   # Price to buy base with quote
                     dex_sell = _ONE / dex_sell_price if dex_sell_price > _ZERO else mid
 
                     log.debug(

@@ -20,7 +20,7 @@ Safety layers (per tick):
   6. RiskManager soft limits
   7. safety_check() absolute ceiling
   8. BinanceTradingRules order filter
-  9. PFA executor + VaR gate
+  9. PFA executor and VaR gate
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from web3 import Web3
+from dotenv import load_dotenv
 
 from config.mode import SystemConfig
 from src.chain.client import ChainClient
@@ -50,6 +51,9 @@ from src.strategy.signal import Signal
 
 from src.executor.engine import Executor, ExecutorConfig, ExecutorState
 from src.executor.recovery import SPRTCircuitBreaker, SPRTConfig, LLMAnomalyAdvisor
+from src.exchange.feed import LiveOrderBook
+from src.pricing.dex_feed import DEXPriceFeed
+from src.exchange.price_feed import PriceFeedManager, PriceState
 
 from src.safety import (
     RiskLimits, RiskManager, PreTradeValidator,
@@ -72,6 +76,7 @@ class ArbBot:
     """Production-ready arbitrage bot with full safety integration."""
 
     def __init__(self, system_config: SystemConfig) -> None:
+        load_dotenv()
         self._cfg = system_config
         self._dry_run = system_config.dry_run
         log.info("ArbBot init | mode=%s dry_run=%s chain_id=%d",
@@ -145,7 +150,7 @@ class ArbBot:
             log.info("CEX connected | sandbox=%s pair=%s",
                      system_config.cex.sandbox, system_config.trading_pair)
         except Exception as exc:
-            log.warning("CEX unavailable: %s — stub active", exc)
+            log.warning("CEX unavailable: %s - stub active", exc)
             self.exchange = _StubExchange()
 
         self._trading_rules = system_config.cex.trading_rules
@@ -231,12 +236,22 @@ class ArbBot:
                 use_dex_first=ec.use_dex_first, simulation_mode=self._dry_run,
                 max_recovery_attempts=ec.max_recovery_attempts,
                 unwind_timeout=ec.unwind_timeout,
-                unwind_slippage_extra_bps=ec.unwind_slippage_bps
+                unwind_slippage_extra_bps=ec.unwind_slippage_bps,
             ),
             dex_price_source=self._dex_price,
             dex_executor=self._dex_exec
         )
         self._llm_advisor = LLMAnomalyAdvisor(api_key=os.getenv("OPENAI_API_KEY", ""))
+
+        # ── Real-time price feeds ─────────────────────────────────────────
+        # CEX: Binance WebSocket depth stream
+        # DEX: Uniswap V2 reserve polling (event-on-change)
+        self._cex_book: LiveOrderBook | None = None
+        self._dex_feed: DEXPriceFeed | None = None
+        self._feed_manager: PriceFeedManager | None = None
+        self._feed_task: asyncio.Task | None = None
+        self._using_ws = False   # True once feeds are running
+
         self._monitor = BotMonitor(
             risk_manager=self._risk_manager,
             circuit_breaker=self.circuit_breaker,
@@ -256,23 +271,215 @@ class ArbBot:
     def from_config(cls, cfg: SystemConfig | None = None) -> "ArbBot":
         return cls(cfg or SystemConfig.from_env())
 
+    def _init_feeds(self) -> None:
+        """
+        Initialize WebSocket and DEX poll feeds.
+        Called lazily from run() so the event loop is already running.
+        """
+        if self._using_ws:
+            return
+
+        pairs = self.pairs
+        is_sandbox = self._cfg.cex.sandbox
+
+        try:
+            # CEX WebSocket - one book per pair
+            if len(pairs) == 1:
+                self._cex_book = LiveOrderBook(
+                    symbol=pairs[0],
+                    testnet=is_sandbox,
+                    max_depth=20,
+                    reconnect=True
+                )
+                log.info(
+                    "CEX WebSocket feed initialized | pair=%s testnet=%s",
+                    pairs[0], is_sandbox
+                )
+            else:
+                self._cex_book = LiveOrderBook(
+                    symbol=pairs[0], testnet=is_sandbox,
+                    max_depth=20, reconnect=True
+                )
+        except Exception as exc:
+            log.warning("CEX WebSocket init failed: %s - will poll REST", exc)
+            self._cex_book = None
+
+        try:
+            if self._dex_price and self._dex_price._pools:
+                # Build pair → PoolState mapping
+                pair_pools = {}
+                for pair in pairs:
+                    base, quote = pair.split("/")
+                    pool = self._dex_price._find_pool(base, quote)
+                    if pool is not None:
+                        pair_pools[pair] = pool
+                if pair_pools:
+                    self._dex_feed = DEXPriceFeed(
+                        chain_client=self._chain_client,
+                        pools=pair_pools,
+                        poll_interval=float(os.getenv("DEX_POLL_INTERVAL_SECONDS", "1.0"))
+                    )
+                    log.info(
+                        "DEX poll feed initialized | pairs=%s", list(pair_pools.keys())
+                    )
+        except Exception as exc:
+            log.warning("DEX poll feed init failed: %s", exc)
+            self._dex_feed = None
+
+        if self._cex_book and self._dex_feed:
+            self._feed_manager = PriceFeedManager(
+                cex_book=self._cex_book,
+                dex_feed=self._dex_feed,
+                pairs=pairs,
+                on_price_update=self._on_price_update,
+                stale_threshold_seconds=float(
+                    os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "5.0")
+                )
+            )
+            # Wire feed manager into generator so generate_from_feed() can be used
+            self.generator._price_feed_manager = self._feed_manager
+            self._using_ws = True
+            log.info(
+                "Event-driven mode ACTIVE | CEX=WebSocket DEX=polling (%.1fs)",
+                float(os.getenv("DEX_POLL_INTERVAL_SECONDS", "1.0"))
+            )
+        else:
+            log.warning(
+                "Falling back to REST polling | cex_book=%s dex_feed=%s",
+                bool(self._cex_book), bool(self._dex_feed)
+            )
+
+    async def _on_price_update(self, pair: str, state: PriceState) -> None:
+        """
+        Callback fired by PriceFeedManager on every CEX or DEX price event.
+        This is the event-driven entry point for signal generation.
+        """
+        if not self.running:
+            return
+
+        # Skip if circuit breaker or kill switches are active
+        if (self.circuit_breaker.is_open()
+                or self._manual_kill.is_active()
+                or self._auto_kill.triggered):
+            return
+
+        # Generate signal from pre-fetched feed prices (no REST call)
+        sig = self.generator.generate_from_feed(pair, self.trade_size, state)
+        if sig is None:
+            return
+
+        # Validate + score + gate
+        valid, reason = self._validator.validate_signal(sig)
+        if not valid:
+            log.debug("FEED_VALIDATION_FAIL | %s | %s", sig.signal_id, reason)
+            return
+
+        qty = self._trading_rules.round_quantity(float(sig.kelly_size))
+        price = self._trading_rules.round_price(float(sig.cex_price))
+        order_ok, order_reason = self._trading_rules.validate_order(qty, price)
+        if not order_ok:
+            log.debug("FEED_ORDER_FILTER | %s | %s", sig.signal_id, order_reason)
+            return
+
+        score = self.scorer.score(sig, self._get_skews())
+        sig.score = score
+        if float(score) < self.min_score_threshold:
+            return
+
+        log.info(
+            "FEED_SIGNAL | %s | spread=%.1fbps conf=%.3f score=%.4f "
+            "cex_bid=%.4f dex=%.4f latency=%.0fms",
+            sig.pair, sig.raw_spread_bps, sig.signal_confidence, score,
+            float(state.cex_bid), float(state.dex_price),
+            state.dex_poll_latency_ms
+        )
+
+        # Push into priority queue for ordered execution
+        import heapq
+        heapq.heappush(self._pq, _PQEntry(-float(score), time.time(), sig))
+        while len(self._pq) > self.max_queue_depth:
+            heapq.heappop(self._pq)
+
+        # Drain and execute the best pending signal
+        while self._pq:
+            entry = heapq.heappop(self._pq)
+            s = entry.signal
+            if s.is_expired():
+                log.debug("Signal %s expired in queue", s.signal_id)
+                continue
+            await self._execute_signal(s)
+            break
+
     async def run(self) -> None:
         self.running = True
         log.info("Bot running | mode=%s dry_run=%s", self._cfg.mode.value, self._dry_run)
-        await self._alerter.info(f"Bot started | mode={self._cfg.mode.value} dry_run={self._dry_run}")
+        await self._alerter.info(
+            f"Bot started | mode={self._cfg.mode.value} dry_run={self._dry_run}"
+        )
         asyncio.create_task(self._monitor.run_health_loop())
         await self._sync_balances()
-        while self.running:
-            try:
-                await self._tick()
-                await asyncio.sleep(1.0)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                log.error("Tick error: %s", exc)
-                self._risk_manager.record_error()
-                await asyncio.sleep(5.0)
+
+        # Initialize WebSocket and DEX feeds
+        self._init_feeds()
+
+        if self._using_ws and self._feed_manager:
+            # ── Event-driven mode ─────────────────────────────────────────
+            log.info("Running in EVENT-DRIVEN mode")
+            async with self._cex_book:
+                feed_task = asyncio.create_task(
+                    self._feed_manager.run(), name="price_feed_manager"
+                )
+                try:
+                    while self.running:
+                        # Safety checks run on a 1-second heartbeat; signal
+                        # processing is entirely callback-driven via _on_price_update
+                        await self._safety_tick()
+                        await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    await self._feed_manager.stop()
+                    feed_task.cancel()
+                    try:
+                        await asyncio.wait_for(feed_task, timeout=3.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+        else:
+            # ── REST polling fallback ──────────────────────────────────────
+            log.info("Running in REST POLLING mode (WebSocket unavailable)")
+            while self.running:
+                try:
+                    await self._tick()
+                    await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    log.error("Tick error: %s", exc)
+                    self._risk_manager.record_error()
+                    await asyncio.sleep(5.0)
+
         await self._shutdown()
+
+    async def _safety_tick(self) -> None:
+        """
+        1-second heartbeat for safety checks in event-driven mode.
+        Signal processing happens via _on_price_update callbacks.
+        """
+        self._dead_man.write_heartbeat()
+
+        if self._manual_kill.is_active():
+            log.critical("MANUAL KILL SWITCH ACTIVE - stopping")
+            await self._alerter.kill_switch_activated("manual kill switch")
+            self.stop()
+            return
+
+        if self._auto_kill.check(self._risk_manager):
+            log.critical("AUTO KILL SWITCH: %s", self._auto_kill.reason)
+            self.stop()
+            return
+
+        if self.circuit_breaker.is_open():
+            log.debug("CB OPEN - %.0fs", self.circuit_breaker.time_until_reset())
 
     def stop(self) -> None:
         log.warning("Bot stop requested")
@@ -293,7 +500,7 @@ class ArbBot:
             return
 
         if self.circuit_breaker.is_open():
-            log.info("CB OPEN - reset in %.0fs", self.circuit_breaker.time_until_reset())
+            log.info("CB OPEN — reset in %.0fs", self.circuit_breaker.time_until_reset())
             return
 
         new_signals: list[Signal] = []
@@ -316,7 +523,7 @@ class ArbBot:
 
             if sig.is_anomalous() and self._llm_advisor.should_query(
                 sig.innovation_zscore, self.circuit_breaker.lambda_statistic,
-                self.circuit_breaker._A, self.circuit_breaker._B,
+                self.circuit_breaker._A, self.circuit_breaker._B
             ):
                 expl = await self._llm_advisor.advise(
                     pair=pair, innovation_zscore=sig.innovation_zscore,
@@ -450,7 +657,7 @@ class ArbBot:
                     quantity=Decimal(str(ctx.leg2_fill_size or 0)),
                     price=Decimal(str(ctx.leg2_fill_price or 0)),
                     fee=Decimal("0"), fee_currency=sig.pair.split("/")[1]
-                ),
+                )
             ))
         except Exception as exc:
             log.warning("PnL record failed: %s", exc)

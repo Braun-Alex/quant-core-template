@@ -1,25 +1,42 @@
 # Quant-Core-Template
 
-A high-integrity engineering baseline for a CEX-DEX arbitrage trading engine.
+A production-ready CEX-DEX arbitrage engine with real on-chain execution,
+multi-layer risk management, automated kill switches, and structured monitoring.
 
-This template provides a robust foundation for building high-performance trading systems with real on-chain DEX integration, cross-venue inventory management, arbitrage signal generation, and a production-ready execution pipeline.
-
-## Architecture Overview
+## Architecture
 
 ```
-tick(t)
-  ├─ SignalGenerator
-  │    ├─ CEX prices      ← Binance (Testnet or Mainnet)
-  │    ├─ DEX prices      ← Uniswap V2 on Ethereum Mainnet
-  │    └─ KalmanFilter    ← Bayesian spread estimator
-  ├─ EntropyCRITIC + TOPSIS  ← Multi-criteria signal scoring
-  ├─ PFA Executor
-  │    ├─ Leg 1  ← CEX (Binance limit-IOC) or DEX (Uniswap V2 swap)
-  │    ├─ Leg 2  ← DEX or CEX (opposite venue)
-  │    └─ Unwind ← Automatic reversal on leg failure
-  ├─ SPRT Circuit Breaker  ← Sequential probability ratio test
-  └─ PnLTracker            ← Trade ledger and P&L reporting
+Real-time price feeds (event-driven)
+  ├─ LiveOrderBook (Binance WebSocket depth stream)
+  │     └─ on each depth diff → PriceFeedManager._on_cex_update()
+  └─ DEXPriceFeed (Uniswap V2 reserve polling, 1s interval)
+        └─ on price change   → PriceFeedManager._on_dex_update()
+                                         │
+                              PriceState (shared in-memory)
+                                         │
+                              _on_price_update(pair, state)  ← fires on every update
+                                         │
+on_price_update callback (per update):
+  ├─ 1. Heartbeat          ← dead man's switch
+  ├─ 2. Manual kill switch ← file-based (/tmp/arb_bot_kill)
+  ├─ 3. Auto kill switch   ← capital floor / error-rate
+  ├─ 4. SPRT circuit breaker
+  ├─ 5. SignalGenerator.generate_from_feed()
+  │       └─ KalmanFilter  ← Bayesian spread estimator
+  ├─ 6. PreTradeValidator  ← price sanity, freshness, spread bounds
+  ├─ 7. BinanceTradingRules ← lot-size, tick-size, min-notional
+  ├─ 8. RiskManager        ← risk limits (size, daily loss, drawdown)
+  ├─ 9. safety_check()     ← ABSOLUTE hard ceilings (non-configurable)
+  ├─ 10. PFA Executor
+  │        ├─ Leg 1        ← Uniswap V2 swap (Arbitrum) or CEX order
+  │        ├─ Leg 2        ← CEX order or Uniswap V2 swap
+  │        └─ Unwind       ← automatic reversal on leg failure
+  ├─ 11. BalanceVerifier   ← post-trade sanity check, stops on mismatch
+  └─ 12. BotMonitor        ← health metrics, Telegram alerts, daily summary
+
+Fallback (if WS connection fails): REST polling every 1 second
 ```
+
 
 ## 🚀 Prerequisites
 
@@ -85,71 +102,38 @@ make test-mode   # Switch to test
 make prod-mode   # Switch to production
 ```
 
-## 🚀 Usage
-
-### Core Commands
-
-| Command | Description |
-|---|---|
-| `make up` | Start all services in detached mode |
-| `make down` | Stop all services |
-| `make logs` | Follow logs of all services |
-| `make run` | Start services and follow app logs |
-
-### Development & Testing
+## 🚀 Commands
 
 ```bash
-make test              # Run all unit tests
-make test-bot          # Run bot tests
-make lint              # Run flake8 linting
-make check             # Full quality check (lint + test)
-make clean             # Clean caches and containers
+make up                   # Start all services
+make down                 # Stop all services
+make run                  # Start + follow app logs
+make logs                 # Follow logs
+
+make test                 # Unit tests
+make test-bot             # Bot integration tests
+make lint                 # flake8
+make check                # lint + test
+
+make integration          # Sepolia blockchain integration test
+make integration-real     # Binance Testnet + Arbitrum/Mainnet dry-run
+
+make fork                 # Start local Anvil fork
+make stop-fork            # Stop Anvil
+
+make check-rebalance      # Cross-venue skew report
+make plan-rebalance       # Rebalance transfer plans
+make check-arb            # Arbitrage opportunity check
+make fork-arb             # Anvil fork of Arbitrum (for demo mode)
+make fund-demo            # Fund wallet with test tokens on Anvil fork
+make check-demo-balances  # Check demo wallet token balances
+make pool-info            # ARB/USDC pool state on fork
+make run-demo             # Start full demo stack (fork + fund + bot)
+make pnl                  # P&L dashboard
+make orderbook            # Live CEX order book snapshot
+make impact               # DEX price impact analysis
 ```
 
-### Integration Testing
-
-```bash
-# Sepolia blockchain integration test
-make transfer-integration
-
-# Testnet bot integration test: Binance Testnet and Ethereum Mainnet
-make bot-integration-testnet
-
-# Mainnet bot integration test (requires funded wallet and mainnet credentials)
-make bot-integration-mainnet
-```
-
-The Testnet integration test (`scripts/bot_integration_test.py`) runs a full pipeline check.
-
-1. Loads and verifies the hot wallet.
-2. Connects to Ethereum Mainnet and reads the chain ID and ETH balance.
-3. Loads registered Uniswap V2 pool states from on-chain data.
-4. Fetches a live Binance order book snapshot.
-5. Generates an arbitrage signal using the Kalman filter.
-6. Runs the executor in dry-run mode - builds swap transactions but does not broadcast them.
-
-### Anvil Fork (Local Ethereum Mainnet)
-
-```bash
-make fork       # Start local Anvil fork of Ethereum mainnet
-make stop-fork  # Stop only Anvil service
-```
-
-### Inventory & Rebalancing
-
-```bash
-make check-rebalance    # Show current cross-venue skew report
-make plan-rebalance     # Generate rebalance plans for all unbalanced assets
-```
-
-### Arbitrage & Analytics
-
-```bash
-make check-arb    # Check arbitrage opportunity for ETH/USDT
-make pnl          # Show position & PnL summary
-make orderbook    # Live Binance order book snapshot
-make impact       # Price impact analysis on Uniswap V2 pool
-```
 
 ## 🚀 Configuration Reference
 
@@ -168,6 +152,36 @@ All parameters can be set in `.env`.
 | `BINANCE_API_KEY` | — | Binance Mainnet API key (production only) |
 | `BINANCE_SECRET` | — | Binance Mainnet secret (production only) |
 | `OPENAI_API_KEY` | — | OpenAI key for LLM anomaly advisor (optional) |
+
+### Network
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_ARBITRUM` | `true` | Use Arbitrum One (false = Ethereum) |
+| `ARBITRUM_RPC_URL` | Public Arb RPC | Arbitrum HTTP endpoint |
+| `POOL_ADDRESSES` | — | Comma-separated Uniswap V2 pair addresses |
+| `GAS_LIMIT_SWAP` | 500000 | Gas limit for swaps |
+| `SLIPPAGE_TOLERANCE_BPS` | 50 | DEX slippage tolerance |
+
+### Risk
+
+| Variable | Default | Description |
+|---|---|---|
+| `INITIAL_CAPITAL` | 100.0 | Starting capital for drawdown tracking |
+| `MAX_TRADE_USD` | 20.0 | Per-trade size ceiling (≤ $25 absolute) |
+| `MAX_DAILY_LOSS` | 15.0 | Daily loss stop (≤ $20 absolute) |
+| `MAX_DRAWDOWN_PCT` | 0.20 | Peak-to-trough drawdown stop |
+| `CONSECUTIVE_LOSS_LIMIT` | 3 | Pause after N consecutive losses |
+
+### Monitoring
+
+| Variable | Description |
+|---|---|
+| `LOG_DIR` | Log file directory (default: `logs`) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for alerts |
+| `TELEGRAM_CHAT_ID` | Telegram chat/channel ID |
+| `KILL_SWITCH_FILE` | Kill switch file path |
+| `HEARTBEAT_FILE` | Heartbeat file path |
 
 ### DEX Parameters
 

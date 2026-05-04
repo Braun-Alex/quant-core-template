@@ -1,4 +1,10 @@
-.PHONY: init build up down fork stop-fork logs clean test lint check impact
+.PHONY: init build up down logs fork stop-fork fork-arb fund-demo check-demo-balances pool-info run-demo \
+        show-mode test-mode prod-mode run test test-bot transfer-integration bot-integration-testnet \
+        bot-integration-mainnet run-bot lint check impact orderbook check-rebalance \
+        plan-rebalance pnl check-arb clean
+
+include .env
+export
 
 DOCKER_COMPOSE = docker compose
 APP_RUN = $(DOCKER_COMPOSE) run --rm app
@@ -26,17 +32,36 @@ down:
 logs:
 	$(DOCKER_COMPOSE) logs -f
 
-# ====================== Anvil fork management ======================
+# ====================== Demo mode ======================
 
-# Start local Anvil fork of Ethereum mainnet
-fork:
+# Start Anvil fork of Arbitrum Mainnet (for demo mode DEX)
+fork-arb:
 	$(DOCKER_COMPOSE) up -d anvil
-	@echo "Anvil fork is running at http://localhost:8545"
-	@echo "Use ETH_RPC_URL=http://localhost:8545 for local development"
+	@echo "Arbitrum fork running at http://localhost:8545"
 
 # Stop only the Anvil service
 stop-fork:
 	$(DOCKER_COMPOSE) stop anvil
+
+# Fund demo wallet with test tokens (ARB, USDC, WETH) via Anvil cheatcodes
+fund-demo:
+	$(APP_RUN) python3 -m src.exchange.demo_setup fund --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545 --tokens ARB,USDC,WETH
+
+# Check demo wallet balances on the fork
+check-demo-balances:
+	$(APP_RUN) python3 -m src.exchange.demo_setup check --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545
+
+# Print ARB/USDC pool state from the Arbitrum fork
+pool-info:
+	$(APP_RUN) python3 -m src.exchange.demo_setup pool
+
+# Run the bot in demo mode (Binance Demo Trading and Anvil fork)
+run-demo:
+	OPERATION_MODE=demo DRY_RUN=false $(DOCKER_COMPOSE) up -d anvil
+	@sleep 3
+	$(APP_RUN) python3 -m src.exchange.demo_setup fund --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545
+	$(DOCKER_COMPOSE) up -d app
+	$(DOCKER_COMPOSE) logs -f app
 
 # ====================== Mode helpers ======================
 

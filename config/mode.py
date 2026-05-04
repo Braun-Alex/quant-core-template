@@ -1,11 +1,8 @@
 """
 System configuration: operation mode, network endpoints, trading rules,
 risk limits, and executor parameters.
-
-Two modes:
-  test       - Binance Testnet + Arbitrum/Ethereum (dry-run)
-  production - Binance Mainnet + Arbitrum One (live execution)
 """
+
 from __future__ import annotations
 
 import math
@@ -21,6 +18,7 @@ load_dotenv()
 
 class OperationMode(str, Enum):
     TEST = "test"
+    DEMO = "demo"
     PRODUCTION = "production"
 
 
@@ -31,35 +29,27 @@ class NetworkPreset:
     default_rpc: str
     router_address: str
     factory_address: str
-    weth_address: str
-    usdc_address: str
 
 
 ETHEREUM_MAINNET = NetworkPreset(
     name="Ethereum Mainnet", chain_id=1,
-    default_rpc="https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY",
+    default_rpc="https://ethereum.publicnode.com",
     router_address="0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-    factory_address="0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
-    weth_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-    usdc_address="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    factory_address="0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 )
 
 ARBITRUM_ONE = NetworkPreset(
     name="Arbitrum One", chain_id=42161,
     default_rpc="https://arb1.arbitrum.io/rpc",
     router_address="0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
-    factory_address="0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9",
-    weth_address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    usdc_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    factory_address="0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9"
 )
 
 SUSHISWAP_ARB = NetworkPreset(
     name="SushiSwap Arbitrum", chain_id=42161,
     default_rpc="https://arb1.arbitrum.io/rpc",
     router_address="0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
-    factory_address="0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
-    weth_address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-    usdc_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    factory_address="0xc35DADB65012eC5796536bD9864eD8773aBc74C4"
 )
 
 
@@ -93,8 +83,6 @@ class DEXConfig:
     chain_id: int = 42161
     router_address: str = ARBITRUM_ONE.router_address
     factory_address: str = ARBITRUM_ONE.factory_address
-    weth_address: str = ARBITRUM_ONE.weth_address
-    usdc_address: str = ARBITRUM_ONE.usdc_address
     pool_addresses: list[str] = field(default_factory=list)
     gas_limit_swap: int = 500_000
     gas_limit_approval: int = 100_000
@@ -156,7 +144,7 @@ class SystemConfig:
     cex_taker_bps: Decimal = Decimal("10")
     dex_swap_bps: Decimal = Decimal("30")
     gas_cost_usd: Decimal = Decimal("0.10")
-    trading_pair: str = "ETH/USDC"
+    trading_pair: str = "ARB/USDC"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     log_dir: str = "logs"
@@ -165,7 +153,12 @@ class SystemConfig:
     @classmethod
     def from_env(cls) -> "SystemConfig":
         mode_str = os.getenv("OPERATION_MODE", "test").lower()
-        mode = OperationMode.PRODUCTION if mode_str == "production" else OperationMode.TEST
+        if mode_str == "production":
+            mode = OperationMode.PRODUCTION
+        elif mode_str == "demo":
+            mode = OperationMode.DEMO
+        else:
+            mode = OperationMode.TEST
         sandbox = mode == OperationMode.TEST
         dry_run = os.getenv("DRY_RUN", "true").lower() not in ("false", "0", "no")
         use_arb = os.getenv("USE_ARBITRUM", "true").lower() != "false"
@@ -177,8 +170,6 @@ class SystemConfig:
             chain_id=int(os.getenv("CHAIN_ID", str(preset.chain_id))),
             router_address=os.getenv("UNISWAP_V2_ROUTER", preset.router_address),
             factory_address=os.getenv("UNISWAP_V2_FACTORY", preset.factory_address),
-            weth_address=os.getenv("WETH_ADDRESS", preset.weth_address),
-            usdc_address=os.getenv("USDC_ADDRESS", preset.usdc_address),
             pool_addresses=[a.strip() for a in os.getenv("POOL_ADDRESSES", "").split(",") if a.strip()],
             gas_limit_swap=int(os.getenv("GAS_LIMIT_SWAP", "500000")),
             gas_limit_approval=int(os.getenv("GAS_LIMIT_APPROVAL", "100000")),
@@ -191,11 +182,11 @@ class SystemConfig:
             secret=os.getenv("BINANCE_TESTNET_SECRET" if sandbox else "BINANCE_SECRET", ""),
             sandbox=sandbox, enable_rate_limit=True,
             trading_rules=BinanceTradingRules(
-                pair=os.getenv("TRADING_PAIR", "ETH/USDC"),
+                pair=os.getenv("TRADING_PAIR", "ARB/USDC"),
                 min_notional_usd=float(os.getenv("MIN_NOTIONAL_USD", "5.0")),
                 lot_size_step=float(os.getenv("LOT_SIZE_STEP", "0.0001")),
                 price_tick=float(os.getenv("PRICE_TICK", "0.01"))
-            ),
+            )
         )
         executor = ExecutorSettings(
             leg1_timeout=Decimal(os.getenv("LEG1_TIMEOUT", "5")),
@@ -241,6 +232,10 @@ class SystemConfig:
     @property
     def is_test(self) -> bool:
         return self.mode == OperationMode.TEST
+
+    @property
+    def is_demo(self) -> bool:
+        return self.mode == OperationMode.DEMO
 
     @property
     def is_production(self) -> bool:
