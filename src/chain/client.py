@@ -11,14 +11,24 @@ from web3.types import (
     HexStr
 )
 
-from src.core.types import Address, TokenAmount, TransactionRequest, TransactionReceipt
+from src.core.types import Address, TokenAmount, TransactionRequest, TransactionReceipt, Token
 from .errors import (
     RPCError,
     TransactionFailed,
     InsufficientFunds,
     NonceTooLow,
-    ReplacementUnderpriced,
+    ReplacementUnderpriced
 )
+
+_ERC20_BALANCE_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    }
+]
 
 
 @dataclass
@@ -76,6 +86,50 @@ class ChainClient:
             bal: int = w3.eth.get_balance(checksum_addr)
             return TokenAmount(raw=bal, decimals=18, symbol="ETH")
         return self._retry(call)
+
+    def get_erc20_balance(self, token: Token, address: Address) -> TokenAmount:
+        """Get ERC20 token balance for address."""
+
+        def call():
+            w3 = self._get_w3()
+
+            contract = w3.eth.contract(
+                address=cast(ChecksumAddress, token.address.checksum),
+                abi=_ERC20_BALANCE_ABI
+            )
+
+            raw: int = contract.functions.balanceOf(
+                cast(ChecksumAddress, address.checksum)
+            ).call()
+
+            return TokenAmount(
+                raw=raw,
+                decimals=token.decimals,
+                symbol=token.symbol
+            )
+
+        return self._retry(call)
+
+    def get_multiple_erc20_balances(
+            self,
+            tokens: list[Token],
+            address: Address
+    ) -> dict[str, TokenAmount]:
+        """Batch-like fetch (sequential with retry safety)."""
+        balances: dict[str, TokenAmount] = {}
+
+        for token in tokens:
+            try:
+                balances[token.symbol] = self.get_erc20_balance(token, address)
+            except Exception:
+                # Fail-soft
+                balances[token.symbol] = TokenAmount(
+                    raw=0,
+                    decimals=token.decimals,
+                    symbol=token.symbol
+                )
+
+        return balances
 
     def get_nonce(self, address: Address, block: BlockIdentifier = "pending") -> int:
         def call():

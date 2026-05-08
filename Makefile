@@ -1,5 +1,6 @@
 .PHONY: init build up down logs fork stop-fork fork-arb fund-demo check-demo-balances pool-info run-demo \
-        show-mode test-mode prod-mode run test test-bot transfer-integration bot-integration-testnet \
+		arb-demo arb-demo-up arb-demo-down arb-prod-dryrun arb-prod scout scout-demo scout-fast \
+        show-mode test-mode demo-mode prod-mode run test test-bot transfer-integration bot-integration-testnet \
         bot-integration-mainnet run-bot lint check impact orderbook check-rebalance \
         plan-rebalance pnl check-arb clean
 
@@ -45,23 +46,73 @@ stop-fork:
 
 # Fund demo wallet with test tokens (ARB, USDC, WETH) via Anvil cheatcodes
 fund-demo:
-	$(APP_RUN) python3 -m src.exchange.demo_setup fund --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545 --tokens ARB,USDC,WETH
+	$(APP_RUN) python3 -m src.exchange.demo_setup fund \
+		--wallet "${DEMO_WALLET_ADDRESS}" \
+		--rpc http://anvil:8545 \
+		--tokens ARB,USDC,WETH
 
 # Check demo wallet balances on the fork
 check-demo-balances:
-	$(APP_RUN) python3 -m src.exchange.demo_setup check --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545
+	$(APP_RUN) python3 -m src.exchange.demo_setup check \
+		--wallet "${DEMO_WALLET_ADDRESS}" \
+		--rpc http://anvil:8545
 
 # Print ARB/USDC pool state from the Arbitrum fork
 pool-info:
 	$(APP_RUN) python3 -m src.exchange.demo_setup pool
 
-# Run the bot in demo mode (Binance Demo Trading and Anvil fork)
+# Run the bot in demo mode (Binance Demo Trading and Anvil fork of Arbitrum One)
+# 1) Start Anvil fork in the background and wait until healthy
+# 2) Fund the demo wallet with test tokens via cheatcodes
+# 3) Start the bot with OPERATION_MODE=demo DRY_RUN=false
+# 4) Tail the bot logs
 run-demo:
+	@echo "==> Starting Anvil fork of Arbitrum Mainnet..."
 	OPERATION_MODE=demo DRY_RUN=false $(DOCKER_COMPOSE) up -d anvil
-	@sleep 3
-	$(APP_RUN) python3 -m src.exchange.demo_setup fund --wallet "${DEMO_WALLET_ADDRESS}" --rpc http://anvil:8545
-	$(DOCKER_COMPOSE) up -d app
-	$(DOCKER_COMPOSE) logs -f app
+	@echo "==> Funding demo wallet with test tokens..."
+	$(APP_RUN) python3 -m src.exchange.demo_setup fund \
+		--wallet "${DEMO_WALLET_ADDRESS}" \
+		--rpc http://anvil:8545 \
+		--tokens ARB,USDC,WETH
+	@echo "==> Starting arbitrage bot in demo mode..."
+	OPERATION_MODE=demo DRY_RUN=false $(APP_RUN) python3 -m scripts.arb_bot
+
+# ====================== Arbitrage scenarios ======================
+
+# Run demo arb scenario (both price directions, 200 USDC)
+# Bot must already be running: make run-demo
+arb-demo:
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction both --amount 200
+
+# Run demo scenario pushing price UP only
+arb-demo-up:
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction up --amount 200
+
+# Run demo scenario pushing price DOWN only
+arb-demo-down:
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction down --amount 200
+
+# Run production arb scenario in DRY-RUN (build txs, do not send)
+arb-prod-dryrun:
+	$(APP_RUN) python3 -m scripts.arb_scenario_production --direction both --dry-run
+
+# Run production arb scenario with REAL funds - use with caution
+arb-prod:
+	$(APP_RUN) python3 -m scripts.arb_scenario_production --direction both --amount 5
+
+# ====================== Pool scout ======================
+
+# Run pool intelligence scout (LLM analysis of ARB/USDC pool)
+scout:
+	$(APP_RUN) python3 -m src.pricing.pool_scout
+
+# Scout on Anvil fork (demo mode)
+scout-demo:
+	$(APP_RUN) python3 -m src.pricing.pool_scout --rpc http://anvil:8545
+
+# Scout without LLM (fast, no OpenAI call)
+scout-fast:
+	$(APP_RUN) python3 -m src.pricing.pool_scout --no-llm
 
 # ====================== Mode helpers ======================
 
@@ -73,13 +124,19 @@ show-mode:
 test-mode:
 	@sed -i 's/^OPERATION_MODE=.*/OPERATION_MODE=test/' .env 2>/dev/null || \
 		echo "OPERATION_MODE=test" >> .env
-	@echo "Switched to TEST mode (Binance Testnet and Ethereum Mainnet dry-run)"
+	@echo "Switched to TEST mode (Binance Testnet + Arbitrum dry-run)"
+
+# Switch to demo mode
+demo-mode:
+	@sed -i 's/^OPERATION_MODE=.*/OPERATION_MODE=demo/' .env 2>/dev/null || \
+		echo "OPERATION_MODE=demo" >> .env
+	@echo "Switched to DEMO mode (Binance Demo Trading + Anvil fork of Arbitrum)"
 
 # Switch to production mode (use with caution)
 prod-mode:
 	@sed -i 's/^OPERATION_MODE=.*/OPERATION_MODE=production/' .env 2>/dev/null || \
 		echo "OPERATION_MODE=production" >> .env
-	@echo "Switched to PRODUCTION mode (Binance Mainnet and Ethereum Mainnet live)"
+	@echo "Switched to PRODUCTION mode (Binance Mainnet + Arbitrum One live)"
 
 # ====================== Application commands ======================
 
@@ -97,7 +154,7 @@ test-bot:
 transfer-integration:
 	$(APP_RUN) python3 -m scripts.transfer_integration_test
 
-# Testnet bot integration test: Binance Testnet and Ethereum Mainnet (test mode = dry-run)
+# Testnet bot integration test: Binance Testnet + Arbitrum (dry-run)
 bot-integration-testnet:
 	$(APP_RUN) env OPERATION_MODE=test python3 -m scripts.bot_integration_test
 

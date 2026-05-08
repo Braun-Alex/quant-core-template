@@ -3,9 +3,8 @@ Monitoring, alerting, and observability.
 
 Components:
   BotMonitor        - collects BotHealth + TradeMetrics, logs them structured
-  TelegramAlerter   - sends critical alerts to a Telegram chat
   BalanceVerifier   - compares expected vs actual balances; stops on mismatch
-  DailySummary      - generates and optionally sends end-of-day report
+  configure_logging - sets up rotating file + stdout logging
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +33,6 @@ class BotHealth:
     last_trade_time: float = 0.0
 
     cex_last_response_ms: float = 0.0
-
     dex_last_response_ms: float = 0.0
 
     current_capital: float = 0.0
@@ -95,115 +92,6 @@ class TradeMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Telegram alerter
-# ---------------------------------------------------------------------------
-
-class TelegramAlerter:
-    """
-    Sends messages to a Telegram chat via the Bot API.
-
-    Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.
-    If either is missing, alerts are logged but not sent (graceful no-op).
-    """
-
-    def __init__(
-        self,
-        bot_token: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        timeout_seconds: float = 5.0
-    ) -> None:
-        self._token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self._chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-        self._timeout = timeout_seconds
-        self._enabled = bool(self._token and self._chat_id)
-
-        if not self._enabled:
-            log.info(
-                "TelegramAlerter: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set - "
-                "alerts will be logged only"
-            )
-
-    # ------------------------------------------------------------------
-    # Public send methods
-    # ------------------------------------------------------------------
-
-    async def critical(self, message: str) -> None:
-        """Send a 🚨 critical alert."""
-        await self._send(f"🚨 CRITICAL: {message}")
-
-    async def warning(self, message: str) -> None:
-        """Send a ⚠️ warning."""
-        await self._send(f"⚠️ WARNING: {message}")
-
-    async def info(self, message: str) -> None:
-        """Send an ℹ️ informational alert."""
-        await self._send(f"{message}")
-
-    async def trade_done(self, metrics: TradeMetrics) -> None:
-        sign = "+" if metrics.net_pnl >= 0 else ""
-        emoji = "✅" if metrics.net_pnl >= 0 else "❌"
-        await self._send(
-            f"{emoji} TRADE {metrics.pair} {metrics.direction}\n"
-            f"Net PnL: {sign}${metrics.net_pnl:.4f}\n"
-            f"Spread: {metrics.actual_spread_bps:.1f}bps | "
-            f"TTF: {metrics.signal_to_fill_ms:.0f}ms"
-        )
-
-    async def kill_switch_activated(self, reason: str) -> None:
-        await self._send(f"🔴 BOT KILLED: {reason}")
-
-    async def daily_summary(self, summary: dict) -> None:
-        n = summary.get("trades", 0)
-        if n == 0:
-            await self._send("📊 Daily Summary: No trades today")
-            return
-        wins = summary.get("wins", 0)
-        losses = summary.get("losses", 0)
-        pnl = summary.get("total_pnl", 0.0)
-        sign = "+" if pnl >= 0 else ""
-        wr = summary.get("win_rate", 0.0) * 100
-        cap = summary.get("capital", 0.0)
-        dd = summary.get("drawdown_pct", 0.0) * 100
-        best = summary.get("best_trade", 0.0)
-        worst = summary.get("worst_trade", 0.0)
-        await self._send(
-            f"📊 <b>Daily Summary</b>\n\n"
-            f"Trades: {n} ({wins}W / {losses}L)\n"
-            f"Win Rate: {wr:.0f}%\n\n"
-            f"💰 PnL: <b>{sign}${pnl:.2f}</b>\n"
-            f"Best: +${best:.2f}   Worst: ${worst:.2f}\n\n"
-            f"Capital: ${cap:.2f}\n"
-            f"Drawdown: {dd:.1f}%"
-        )
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    async def _send(self, text: str) -> None:
-        log.info("ALERT | %s", text)
-        if not self._enabled:
-            return
-        try:
-            import aiohttp
-            url = f"https://api.telegram.org/bot{self._token}/sendMessage"
-            payload = {
-                "chat_id": self._chat_id,
-                "text": text,
-                "parse_mode": "HTML"
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=self._timeout)
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        log.warning("Telegram send failed (HTTP %d): %s", resp.status, body[:200])
-        except Exception as exc:
-            log.warning("Telegram alert failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
 # Balance verifier
 # ---------------------------------------------------------------------------
 
@@ -221,8 +109,8 @@ class BalanceVerifier:
         chain_client,
         wallet_address: str,
         inventory_tracker,
-        tolerance: float = 0.001,   # 0.1% - allow for rounding
-        stop_callback=None,   # callable() to halt the bot
+        tolerance: float = 0.001,
+        stop_callback=None,
         alert_callback=None   # Async callable(msg: str)
     ) -> None:
         self._exchange = exchange_client
@@ -234,14 +122,9 @@ class BalanceVerifier:
         self._alert = alert_callback
 
     async def verify(self, assets: list[str] = None) -> bool:
-        """
-        Fetch real balances and compare to inventory expectations.
-        Returns True if all within tolerance; False (and stops bot) if not.
-        """
         assets = assets or ["ETH", "USDC", "USDT"]
         mismatches: list[str] = []
 
-        # ── CEX balances ───────────────────────────────────────────────
         try:
             cex_actual = self._exchange.fetch_balance()
         except Exception as exc:
@@ -254,9 +137,7 @@ class BalanceVerifier:
             )
             try:
                 from src.inventory.tracker import Venue
-                expected = float(
-                    self._inventory.available(Venue.BINANCE, asset)
-                )
+                expected = float(self._inventory.available(Venue.BINANCE, asset))
             except Exception:
                 continue
 
@@ -267,7 +148,6 @@ class BalanceVerifier:
                     f"diff={diff:.6f}"
                 )
 
-        # ── On-chain (DEX) balances ────────────────────────────────────
         try:
             await self._check_onchain_balances(assets, mismatches)
         except Exception as exc:
@@ -291,7 +171,6 @@ class BalanceVerifier:
     async def _check_onchain_balances(
         self, assets: list[str], mismatches: list[str]
     ) -> None:
-        """Check on-chain ERC-20 balances. Non-fatal if chain is unreachable."""
         from src.core.types import Address
         from src.inventory.tracker import Venue
 
@@ -303,7 +182,6 @@ class BalanceVerifier:
             if expected <= 0:
                 continue
 
-            # ETH native balance
             if asset in ("ETH", "WETH"):
                 try:
                     bal = self._chain.get_balance(Address.from_string(self._wallet))
@@ -319,17 +197,13 @@ class BalanceVerifier:
 
 
 # ---------------------------------------------------------------------------
-# Bot monitor (wraps health logging and heartbeat)
+# Bot monitor
 # ---------------------------------------------------------------------------
 
 class BotMonitor:
     """
     Collects and logs health metrics every minute.
-    Also writes the heartbeat file for the dead-man switch.
-
-    Wire into the bot:
-        monitor = BotMonitor(risk_manager, circuit_breaker, kill_switch, alerter)
-        asyncio.create_task(monitor.run_health_loop())
+    Sends alerts via the supplied alerter.
     """
 
     def __init__(
@@ -338,7 +212,7 @@ class BotMonitor:
         circuit_breaker,
         kill_switch,
         dead_man_switch=None,
-        alerter: Optional[TelegramAlerter] = None,
+        alerter=None,
         health_interval_seconds: float = 60.0
     ) -> None:
         self._risk = risk_manager
@@ -350,24 +224,20 @@ class BotMonitor:
         self._start_time = time.time()
 
     async def run_health_loop(self) -> None:
-        """Background task: log health every minute, write heartbeat every 30s."""
         heartbeat_interval = min(30.0, self._interval / 2)
         last_health_log = 0.0
 
         while True:
             now = time.time()
 
-            # Heartbeat
             if self._dms:
                 self._dms.write_heartbeat()
 
-            # Health snapshot
             if now - last_health_log >= self._interval:
                 health = self._build_health()
                 health.log_health()
                 last_health_log = now
 
-                # Alert on degraded state
                 if self._alerter:
                     if health.circuit_breaker_open:
                         await self._alerter.warning("Circuit breaker is OPEN")
@@ -394,7 +264,6 @@ class BotMonitor:
         )
 
     def log_trade_metrics(self, ctx) -> None:
-        """Extract TradeMetrics from an ExecutionContext and log them."""
         try:
             sig = ctx.signal
             m = TradeMetrics(
@@ -410,7 +279,10 @@ class BotMonitor:
                 leg2_slippage_bps=float(ctx.leg2_slippage_bps or 0),
                 signal_to_fill_ms=float(ctx.duration()) * 1000,
                 gross_pnl=float(ctx.leg_gap_pnl or 0),
-                fees_paid=float((ctx.actual_net_pnl or Decimal("0")) - (ctx.leg_gap_pnl or Decimal("0"))),
+                fees_paid=float(
+                    (ctx.actual_net_pnl or Decimal("0"))
+                    - (ctx.leg_gap_pnl or Decimal("0"))
+                ),
                 net_pnl=float(ctx.actual_net_pnl or 0),
                 state=ctx.state.name
             )
@@ -420,15 +292,10 @@ class BotMonitor:
 
 
 # ---------------------------------------------------------------------------
-# Logging setup helper
+# Logging setup
 # ---------------------------------------------------------------------------
 
 def configure_logging(log_dir: str = "logs", level: int = logging.INFO) -> None:
-    """
-    Configure structured logging to both a rotating daily file and stdout.
-    Call once at bot startup before any other code runs.
-    """
-    import os
     os.makedirs(log_dir, exist_ok=True)
 
     date_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
@@ -444,9 +311,11 @@ def configure_logging(log_dir: str = "logs", level: int = logging.INFO) -> None:
 
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
 
-    # Silence noisy third-party loggers
     for noisy in ("web3", "urllib3", "asyncio", "websockets"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.getLogger("arb_bot").setLevel(level)
-    log.info("Logging initialized | file=%s level=%s", log_file, logging.getLevelName(level))
+    log.info(
+        "Logging initialized | file=%s level=%s",
+        log_file, logging.getLevelName(level)
+    )

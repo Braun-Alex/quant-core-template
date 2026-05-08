@@ -13,3 +13,4 @@ pydantic
 aiohttp
 websockets
 numpy
+py-cord

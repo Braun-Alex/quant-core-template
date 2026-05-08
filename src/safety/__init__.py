@@ -8,9 +8,10 @@ from src.safety.killswitch import (
     KILL_SWITCH_FILE, HEARTBEAT_FILE
 )
 from src.safety.monitoring import (
-    BotHealth, TradeMetrics, TelegramAlerter, BalanceVerifier,
+    BotHealth, TradeMetrics, BalanceVerifier,
     BotMonitor, configure_logging
 )
+from src.safety.discord_notifier import DiscordAlerter
 
 __all__ = [
     "RiskLimits", "RiskManager", "TradeRecord",
@@ -20,6 +21,7 @@ __all__ = [
     "ABSOLUTE_MIN_CAPITAL", "ABSOLUTE_MAX_TRADES_PER_HOUR",
     "ABSOLUTE_MAX_SPREAD_BPS", "ABSOLUTE_MAX_ERRORS_PER_HOUR",
     "KILL_SWITCH_FILE", "HEARTBEAT_FILE",
-    "BotHealth", "TradeMetrics", "TelegramAlerter",
-    "BalanceVerifier", "BotMonitor", "configure_logging"
+    "BotHealth", "TradeMetrics",
+    "BalanceVerifier", "BotMonitor", "configure_logging",
+    "DiscordAlerter"
 ]

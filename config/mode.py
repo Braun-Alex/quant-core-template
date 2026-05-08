@@ -55,7 +55,7 @@ SUSHISWAP_ARB = NetworkPreset(
 
 @dataclass
 class BinanceTradingRules:
-    pair: str = "ETH/USDC"
+    pair: str = "ARB/USDC"
     min_notional_usd: float = 5.0
     lot_size_step: float = 0.0001
     price_tick: float = 0.01
@@ -99,6 +99,9 @@ class CEXConfig:
     enable_rate_limit: bool = True
     default_type: str = "spot"
     trading_rules: BinanceTradingRules = field(default_factory=BinanceTradingRules)
+    # Demo Trading uses its own REST/WS base URLs (not sandbox flag)
+    demo_rest_url: str = ""
+    demo_ws_url: str = ""
 
 
 @dataclass
@@ -147,6 +150,7 @@ class SystemConfig:
     trading_pair: str = "ARB/USDC"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    discord_webhook_url: str = ""
     log_dir: str = "logs"
     dry_run: bool = True
 
@@ -159,13 +163,22 @@ class SystemConfig:
             mode = OperationMode.DEMO
         else:
             mode = OperationMode.TEST
-        sandbox = mode == OperationMode.TEST
+
         dry_run = os.getenv("DRY_RUN", "true").lower() not in ("false", "0", "no")
         use_arb = os.getenv("USE_ARBITRUM", "true").lower() != "false"
         preset = ARBITRUM_ONE if use_arb else ETHEREUM_MAINNET
 
+        # ── DEX config ────────────────────────────────────────────────────────
+        if mode == OperationMode.DEMO:
+            # Demo mode: DEX runs against a local Anvil fork of Arbitrum
+            dex_rpc = os.getenv("ANVIL_RPC_URL", "http://anvil:8545")
+            dex_dry_run = False   # Execute real txs on the fork
+        else:
+            dex_rpc = os.getenv("ARBITRUM_RPC_URL", os.getenv("ETH_RPC_URL", preset.default_rpc))
+            dex_dry_run = dry_run
+
         dex = DEXConfig(
-            rpc_url=os.getenv("ARBITRUM_RPC_URL", os.getenv("ETH_RPC_URL", preset.default_rpc)),
+            rpc_url=dex_rpc,
             ws_url=os.getenv("ARBITRUM_WS_URL", os.getenv("ETH_WS_URL", "")),
             chain_id=int(os.getenv("CHAIN_ID", str(preset.chain_id))),
             router_address=os.getenv("UNISWAP_V2_ROUTER", preset.router_address),
@@ -175,12 +188,40 @@ class SystemConfig:
             gas_limit_approval=int(os.getenv("GAS_LIMIT_APPROVAL", "100000")),
             slippage_tolerance_bps=Decimal(os.getenv("SLIPPAGE_TOLERANCE_BPS", "50")),
             deadline_seconds=int(os.getenv("TX_DEADLINE_SECONDS", "300")),
-            dry_run=dry_run
+            dry_run=dex_dry_run
         )
+
+        # ── CEX config ────────────────────────────────────────────────────────
+        if mode == OperationMode.TEST:
+            # Binance Testnet
+            cex_api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
+            cex_secret = os.getenv("BINANCE_TESTNET_SECRET", "")
+            cex_sandbox = True
+            cex_demo_rest = ""
+            cex_demo_ws = ""
+        elif mode == OperationMode.DEMO:
+            # Binance Demo Trading (real mainnet book, virtual fills)
+            cex_api_key = os.getenv("BINANCE_DEMO_API_KEY", "")
+            cex_secret = os.getenv("BINANCE_DEMO_SECRET", "")
+            # Demo Trading uses mainnet-style API: sandbox=False, custom URLs
+            cex_sandbox = False
+            cex_demo_rest = os.getenv("BINANCE_DEMO_REST_URL", "https://demo-trading.binance.com")
+            cex_demo_ws = os.getenv("BINANCE_DEMO_WS_URL", "wss://demo-trading.binance.com/ws")
+        else:
+            # Production: Binance Mainnet
+            cex_api_key = os.getenv("BINANCE_API_KEY", "")
+            cex_secret = os.getenv("BINANCE_SECRET", "")
+            cex_sandbox = False
+            cex_demo_rest = ""
+            cex_demo_ws = ""
+
         cex = CEXConfig(
-            api_key=os.getenv("BINANCE_TESTNET_API_KEY" if sandbox else "BINANCE_API_KEY", ""),
-            secret=os.getenv("BINANCE_TESTNET_SECRET" if sandbox else "BINANCE_SECRET", ""),
-            sandbox=sandbox, enable_rate_limit=True,
+            api_key=cex_api_key,
+            secret=cex_secret,
+            sandbox=cex_sandbox,
+            enable_rate_limit=True,
+            demo_rest_url=cex_demo_rest,
+            demo_ws_url=cex_demo_ws,
             trading_rules=BinanceTradingRules(
                 pair=os.getenv("TRADING_PAIR", "ARB/USDC"),
                 min_notional_usd=float(os.getenv("MIN_NOTIONAL_USD", "5.0")),
@@ -188,6 +229,7 @@ class SystemConfig:
                 price_tick=float(os.getenv("PRICE_TICK", "0.01"))
             )
         )
+
         executor = ExecutorSettings(
             leg1_timeout=Decimal(os.getenv("LEG1_TIMEOUT", "5")),
             leg2_timeout=Decimal(os.getenv("LEG2_TIMEOUT", "60")),
@@ -199,6 +241,7 @@ class SystemConfig:
             unwind_timeout=Decimal(os.getenv("UNWIND_TIMEOUT", "30")),
             unwind_slippage_bps=Decimal(os.getenv("UNWIND_SLIPPAGE_BPS", "100"))
         )
+
         risk = RiskConfig(
             max_trade_usd=float(os.getenv("MAX_TRADE_USD", "20.0")),
             max_trade_pct=float(os.getenv("MAX_TRADE_PCT", "0.20")),
@@ -213,6 +256,7 @@ class SystemConfig:
             max_signal_age_seconds=float(os.getenv("MAX_SIGNAL_AGE_SECONDS", "5.0")),
             initial_capital=float(os.getenv("INITIAL_CAPITAL", "100.0"))
         )
+
         return cls(
             mode=mode, dex=dex, cex=cex, executor=executor, risk=risk,
             signal_ttl_seconds=Decimal(os.getenv("SIGNAL_TTL_SECONDS", "5")),
@@ -225,6 +269,7 @@ class SystemConfig:
             trading_pair=os.getenv("TRADING_PAIR", "ETH/USDC"),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
             log_dir=os.getenv("LOG_DIR", "logs"),
             dry_run=dry_run
         )
