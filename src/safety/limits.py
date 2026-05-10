@@ -119,6 +119,89 @@ class RiskManager:
         )
 
     # ------------------------------------------------------------------
+    # Capital sync from real balances
+    # ------------------------------------------------------------------
+
+    def sync_capital_from_inventory(
+        self,
+        inventory_tracker,
+        price_map: dict | None = None,
+        allowed_symbols: set[str] | None = None
+    ) -> float:
+        """
+        Recalculate current_capital from real VenueTracker balances.
+
+        Call this after every _sync_balances() so that BotMonitor and
+        safety_check() see the true portfolio value instead of the
+        accounting-only running total.
+
+        Returns the newly computed capital (USD).
+        """
+        STABLES = {"USDC", "USDT", "BUSD", "DAI", "TUSD", "USDP"}
+        price_map = price_map or {}
+
+        total_usd = 0.0
+        tracked_logs: list[str] = []
+        untracked_logs: list[str] = []
+        try:
+            snap = inventory_tracker.snapshot()
+            for venue_name, assets in snap.get("venues", {}).items():
+                for symbol, info in assets.items():
+                    amount = float(info.get("total", 0))
+                    if amount <= 0:
+                        continue
+                    sym_upper = symbol.upper()
+                    is_tracked = allowed_symbols is None or sym_upper in allowed_symbols
+
+                    if not is_tracked:
+                        untracked_logs.append(
+                            f"({venue_name}) {symbol} {amount:.8f}"
+                        )
+                    else:
+                        if sym_upper in STABLES:
+                            price = 1.0
+                        else:
+                            price = float(
+                                price_map.get(sym_upper,
+                                              price_map.get(symbol, 0.0))
+                            )
+
+                        usd_value = amount * price
+                        total_usd += usd_value
+
+                        tracked_logs.append(
+                            f"({venue_name}) {symbol} "
+                            f"{amount:.8f} | ${price:.6f} "
+                            f"(${usd_value:.2f})"
+                        )
+        except Exception as exc:
+            log.warning("sync_capital_from_inventory failed: %s", exc)
+            return self.current_capital
+
+        if total_usd > 0:
+            old_capital = self.current_capital
+            self.current_capital = total_usd
+            self.peak_capital = max(self.peak_capital, total_usd)
+            log.info(
+                "Capital synced from inventory | old=$%.2f new=$%.2f",
+                old_capital, total_usd
+            )
+
+            if tracked_logs:
+                log.info(
+                    "Tracked positions\n%s",
+                    "\n".join(tracked_logs)
+                )
+
+            if untracked_logs:
+                log.info(
+                    "Untracked positions\n%s",
+                    "\n".join(untracked_logs)
+                )
+
+        return self.current_capital
+
+    # ------------------------------------------------------------------
     # Pre-trade gate
     # ------------------------------------------------------------------
 

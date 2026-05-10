@@ -43,7 +43,7 @@ _EPS = Decimal("1E-12")
 class FeeStructure:
     cex_taker_bps: Decimal = Decimal("10")
     dex_swap_bps: Decimal = Decimal("30")
-    gas_cost_usd: Decimal = Decimal("5")
+    gas_cost_usd: Decimal = Decimal("0.1")
 
     def __post_init__(self) -> None:
         self.cex_taker_bps = Decimal(str(self.cex_taker_bps))
@@ -147,7 +147,7 @@ class KalmanSpreadFilter:
             q_acc += pv_cur + (pm_cur - pm_prev) ** 2 - pv_prior
         new_Q = max(q_acc / max(n - _ONE, Decimal("1")), Decimal("1E-9"))
 
-        log.debug(
+        log.info(
             "EM: Q %.2e->%.2e  R %.2e->%.2e",
             float(self._state.process_noise), float(new_Q),
             float(self._state.observation_noise), float(new_R)
@@ -290,7 +290,7 @@ class SignalGenerator:
             "dex_sell": dex_sell
         }
 
-        log.debug(
+        log.info(
             "[FEED] %s cex_bid=%.4f cex_ask=%.4f dex=%.4f dex_buy=%.4f dex_sell=%.4f",
             pair, float(cex_bid), float(cex_ask), float(dex_price),
             float(dex_buy), float(dex_sell)
@@ -423,7 +423,7 @@ class SignalGenerator:
             cex_bid = Decimal(str(ob["bids"][0][0]))
             cex_ask = Decimal(str(ob["asks"][0][0]))
         except Exception as exc:
-            log.debug("CEX order book fetch failed for %s: %s", pair, exc)
+            log.info("CEX order book fetch failed for %s: %s", pair, exc)
             return None
 
         base, quote = pair.split("/")
@@ -446,7 +446,7 @@ class SignalGenerator:
                     dex_buy = dex_buy_price   # Price to buy base with quote
                     dex_sell = _ONE / dex_sell_price if dex_sell_price > _ZERO else mid
 
-                    log.debug(
+                    log.info(
                         "%s DEX prices: buy=%.4f sell=%.4f (CEX mid=%.4f)",
                         pair, float(dex_buy), float(dex_sell), float(mid)
                     )
@@ -455,7 +455,7 @@ class SignalGenerator:
                         "dex_buy": dex_buy, "dex_sell": dex_sell
                     }
             except Exception as exc:
-                log.debug("DEX price fetch failed for %s: %s", pair, exc)
+                log.info("DEX price fetch failed for %s: %s", pair, exc)
 
         # --- Try PricingEngine ---
         if self._pricing is not None and self._pricing._finder is not None:
@@ -483,12 +483,12 @@ class SignalGenerator:
                     "dex_buy": dex_buy, "dex_sell": dex_sell
                 }
             except Exception as exc:
-                log.debug("PricingEngine quote failed for %s: %s", pair, exc)
+                log.info("PricingEngine quote failed for %s: %s", pair, exc)
 
         # --- Fallback: mid ± offset ---
         dex_buy = mid * (_ONE + self._cfg.dex_premium_fraction)
         dex_sell = mid * (_ONE + self._cfg.dex_discount_fraction)
-        log.debug(
+        log.info(
             "%s using fallback DEX prices: buy=%.4f sell=%.4f",
             pair, float(dex_buy), float(dex_sell)
         )
@@ -587,8 +587,8 @@ class SignalGenerator:
                     >= size * price * buf
                 )
                 return base_ok and quote_ok
-        except Exception:
-            return True
+        except Exception as exc:
+            raise RuntimeError(f"Failed to check inventory: {exc}")
 
     @staticmethod
     def _normal_cdf(z: Decimal) -> Decimal:

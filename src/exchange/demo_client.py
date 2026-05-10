@@ -9,16 +9,9 @@ different from Binance Testnet:
                    but fills are simulated against that real book
                    → realistic spreads, real price discovery, virtual funds
 
-This makes Demo Trading the only safe environment where you can validate
-CEX-DEX arbitrage logic with *realistic* CEX behavior before real risking.
-
-API compatibility
------------------
-Demo Trading uses the same REST and WebSocket API as Binance mainnet.
-The only differences:
-  - Base URL:  https://demo-trading.binance.com
-  - WS URL:    wss://demo-trading.binance.com/ws
-  - Separate API keys (generated on demo-trading.binance.com)
+IMPORTANT: Binance Demo Trading does NOT use the standard CCXT sandbox flag
+and does NOT expose a standard /api/time endpoint. It requires direct HTTP
+requests to https://demo-trading.binance.com/api/v3/... endpoints.
 
 Environment variables
 ---------------------
@@ -27,12 +20,6 @@ Environment variables
 
   BINANCE_DEMO_REST_URL   (default https://demo-trading.binance.com)
   BINANCE_DEMO_WS_URL     (default wss://demo-trading.binance.com/ws)
-
-Usage
------
-    from src.exchange.demo_client import BinanceDemoClient
-    client = BinanceDemoClient.from_env()
-    book = client.fetch_order_book("ARB/USDC")
 """
 
 from __future__ import annotations
@@ -43,6 +30,11 @@ import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import requests
+import hmac
+import hashlib
+from urllib.parse import urlencode
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,18 +43,11 @@ log = logging.getLogger(__name__)
 
 BINANCE_DEMO_REST_URL: str = os.getenv(
     "BINANCE_DEMO_REST_URL", "https://demo-trading.binance.com"
-)
+).rstrip("/")
+
 BINANCE_DEMO_WS_URL: str = os.getenv(
     "BINANCE_DEMO_WS_URL", "wss://demo-trading.binance.com/ws"
 )
-
-_REQUEST_WEIGHTS: dict[str, int] = {
-    "fetch_order_book": 5, "fetch_balance": 10, "create_order": 1,
-    "cancel_order": 1, "fetch_order": 2, "fetch_trading_fee": 20,
-    "fetch_time": 1
-}
-_RATE_LIMIT_MAX = 1200
-_RATE_LIMIT_THRESHOLD = int(_RATE_LIMIT_MAX * 0.9)
 
 
 def _to_dec(value: Any) -> Decimal:
@@ -76,64 +61,43 @@ def _to_dec(value: Any) -> Decimal:
 
 class BinanceDemoClient:
     """
-    Binance Demo Trading REST client.
+    Binance Demo Trading REST client using direct HTTP requests.
 
-    Drop-in replacement for BinanceClient - identical public API,
-    routes all requests to demo-trading.binance.com instead of Binance mainnet.
+    Binance Demo Trading uses the same API structure as mainnet
+    but at a different base URL. CCXT's sandbox mode does NOT work
+    with Demo Trading - we use requests directly.
 
     Demo Trading characteristics:
       ✓ Real-time mainnet order book mirrored exactly
-      ✓ Free virtual balance ($1,000,000 USDT on account creation)
-      ✓ Supports all mainnet spot pairs including ARB/USDC
+      ✓ Free virtual balance (created on account registration)
+      ✓ Supports mainnet spot pairs including ARB/USDC
       ✗ Fills are simulated (no real counterparty)
       ✗ Cannot withdraw
     """
 
     def __init__(self, api_key: str, secret: str) -> None:
-        try:
-            import ccxt
-        except ImportError as exc:
-            raise ImportError("ccxt is required: pip install ccxt") from exc
-
-        import ccxt
-
-        # ccxt binance supports custom URLs via options
-        self._exchange = ccxt.binance({
-            "apiKey": api_key,
-            "secret": secret,
-            "options": {
-                "defaultType": "spot",
-                # Override both REST and WS base URLs to Demo Trading
-                "baseUrl": BINANCE_DEMO_REST_URL
-            },
-            "enableRateLimit": True,
-            # Manually set URLs since ccxt does not have a demo-trading preset
-            "urls": {
-                "api": {
-                    "public": f"{BINANCE_DEMO_REST_URL}/api",
-                    "private": f"{BINANCE_DEMO_REST_URL}/api",
-                    "v3": f"{BINANCE_DEMO_REST_URL}/api/v3"
-                },
-                "ws": {
-                    "public": BINANCE_DEMO_WS_URL,
-                    "private": BINANCE_DEMO_WS_URL
-                },
-            },
+        self._api_key = api_key
+        self._secret = secret
+        self._base_url = BINANCE_DEMO_REST_URL
+        self._session = requests.Session()
+        self._session.headers.update({
+            "X-MBX-APIKEY": self._api_key,
+            "Content-Type": "application/json"
         })
-
-        self._weight_consumed: int = 0
-        self._window_resets_at: float = time.monotonic() + 60.0
 
         # Verify connectivity
         try:
-            self._call("fetch_time")
+            resp = self._public_get("/api/v3/time")
+            server_time = resp.get("serverTime", 0)
             log.info(
-                "BinanceDemoClient connected | url=%s", BINANCE_DEMO_REST_URL
+                "BinanceDemoClient connected | url=%s serverTime=%d",
+                self._base_url, server_time
             )
         except Exception as exc:
             log.warning(
                 "BinanceDemoClient connectivity check failed: %s "
-                "(ensure BINANCE_DEMO_API_KEY and BINANCE_DEMO_SECRET are set)",
+                "(ensure BINANCE_DEMO_API_KEY / BINANCE_DEMO_SECRET are set "
+                "and the account exists at demo-trading.binance.com)",
                 exc
             )
 
@@ -150,17 +114,21 @@ class BinanceDemoClient:
         return cls(api_key, secret)
 
     # ------------------------------------------------------------------
-    # Public API (identical to BinanceClient)
+    # Public API (compatible with BinanceClient)
     # ------------------------------------------------------------------
 
     def fetch_order_book(self, symbol: str, limit: int = 20) -> dict:
-        raw = self._call("fetch_order_book", symbol, limit)
+        """Return a normalized L2 order book snapshot."""
+        # Convert pair format: "ARB/USDC" -> "ARBUSDC"
+        raw_symbol = symbol.replace("/", "").upper()
+        raw = self._public_get("/api/v3/depth", {"symbol": raw_symbol, "limit": limit})
+
         bids = sorted(
-            [(Decimal(str(p)), Decimal(str(q))) for p, q in raw["bids"]],
+            [(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("bids", [])],
             key=lambda x: x[0], reverse=True
         )
         asks = sorted(
-            [(Decimal(str(p)), Decimal(str(q))) for p, q in raw["asks"]],
+            [(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("asks", [])],
             key=lambda x: x[0]
         )
         best_bid = bids[0] if bids else (Decimal("0"), Decimal("0"))
@@ -176,52 +144,77 @@ class BinanceDemoClient:
         )
         return {
             "symbol": symbol,
-            "timestamp": raw.get("timestamp") or int(time.time() * 1000),
-            "bids": bids, "asks": asks,
-            "best_bid": best_bid, "best_ask": best_ask,
-            "mid_price": mid, "spread_bps": spread_bps
+            "timestamp": raw.get("lastUpdateId", int(time.time() * 1000)),
+            "bids": bids,
+            "asks": asks,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid_price": mid,
+            "spread_bps": spread_bps
         }
 
     def fetch_balance(self) -> dict[str, dict]:
-        raw = self._call("fetch_balance")
+        """Return non-zero balances keyed by asset symbol."""
+        raw = self._signed_get("/api/v3/account")
         result: dict[str, dict] = {}
-        for asset, info in raw.items():
-            if not isinstance(info, dict):
-                continue
-            free = _to_dec(info.get("free", 0))
-            locked = _to_dec(info.get("used", 0))
-            total = _to_dec(info.get("total", 0))
+        for item in raw.get("balances", []):
+            free = _to_dec(item.get("free", "0"))
+            locked = _to_dec(item.get("locked", "0"))
+            total = free + locked
             if total == Decimal("0"):
                 continue
-            result[asset] = {"free": free, "locked": locked, "total": total}
+            result[item["asset"]] = {
+                "free": free,
+                "locked": locked,
+                "total": total
+            }
         return result
 
     def create_limit_ioc_order(
         self, symbol: str, side: str, amount: float, price: float
     ) -> dict:
-        raw = self._call(
-            "create_order", symbol, "limit", side, amount, price,
-            {"timeInForce": "IOC"}
-        )
+        """Submit a LIMIT IOC order and return the normalized result."""
+        raw_symbol = symbol.replace("/", "").upper()
+        params = {
+            "symbol": raw_symbol,
+            "side": side.upper(),
+            "type": "LIMIT",
+            "timeInForce": "IOC",
+            "quantity": f"{amount:.8f}",
+            "price": f"{price:.8f}"
+        }
+        raw = self._signed_post("/api/v3/order", params)
         return self._normalize_order(raw)
 
-    def create_market_order(
-        self, symbol: str, side: str, amount: float
-    ) -> dict:
-        raw = self._call("create_order", symbol, "market", side, amount)
+    def create_market_order(self, symbol: str, side: str, amount: float) -> dict:
+        """Submit a market order and return the normalized result."""
+        raw_symbol = symbol.replace("/", "").upper()
+        params = {
+            "symbol": raw_symbol,
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": f"{amount:.8f}"
+        }
+        raw = self._signed_post("/api/v3/order", params)
         return self._normalize_order(raw)
 
     def cancel_order(self, order_id: str, symbol: str) -> dict:
-        return self._normalize_order(self._call("cancel_order", order_id, symbol))
+        raw_symbol = symbol.replace("/", "").upper()
+        params = {"symbol": raw_symbol, "orderId": order_id}
+        raw = self._signed_delete("/api/v3/order", params)
+        return self._normalize_order(raw)
 
     def fetch_order_status(self, order_id: str, symbol: str) -> dict:
-        return self._normalize_order(self._call("fetch_order", order_id, symbol))
+        raw_symbol = symbol.replace("/", "").upper()
+        params = {"symbol": raw_symbol, "orderId": order_id}
+        raw = self._signed_get("/api/v3/order", params)
+        return self._normalize_order(raw)
 
     def get_trading_fees(self, symbol: str) -> dict:
-        raw = self._call("fetch_trading_fee", symbol)
+        """Return maker/taker fees. Demo Trading uses standard 0.1% fees."""
         return {
-            "maker": _to_dec(raw.get("maker", "0.001")),
-            "taker": _to_dec(raw.get("taker", "0.001"))
+            "maker": Decimal("0.001"),
+            "taker": Decimal("0.001")
         }
 
     # ------------------------------------------------------------------
@@ -233,66 +226,112 @@ class BinanceDemoClient:
         return BINANCE_DEMO_WS_URL
 
     # ------------------------------------------------------------------
-    # Internal
+    # HTTP helpers
     # ------------------------------------------------------------------
 
-    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        import ccxt
-        self._consume_weight(method)
-        try:
-            return getattr(self._exchange, method)(*args, **kwargs)
-        except ccxt.RateLimitExceeded:
-            log.warning("Rate limit exceeded on %s - sleeping 60s", method)
-            time.sleep(60)
-            raise
-        except ccxt.AuthenticationError as exc:
-            log.error("Authentication failed on %s: %s", method, exc)
-            raise
-        except ccxt.NetworkError as exc:
-            log.error("Network error on %s: %s", method, exc)
-            raise
-        except ccxt.BaseError as exc:
-            log.error("Exchange error on %s: %s", method, exc)
-            raise
+    def _public_get(self, path: str, params: dict | None = None) -> dict:
+        """Unauthenticated GET request."""
+        url = self._base_url + path
+        resp = self._session.get(url, params=params or {}, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
 
-    def _consume_weight(self, method: str) -> None:
-        now = time.monotonic()
-        if now >= self._window_resets_at:
-            self._weight_consumed = 0
-            self._window_resets_at = now + 60.0
-        weight = _REQUEST_WEIGHTS.get(method, 1)
-        if self._weight_consumed + weight >= _RATE_LIMIT_THRESHOLD:
-            pause = self._window_resets_at - now
-            if pause > 0:
-                time.sleep(pause)
-            self._weight_consumed = 0
-            self._window_resets_at = time.monotonic() + 60.0
-        self._weight_consumed += weight
+    def _signed_get(self, path: str, params: dict | None = None) -> dict:
+        """Authenticated GET request with HMAC signature."""
+        params = dict(params or {})
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        query = urlencode(params)
+        signature = hmac.new(
+            self._secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+        url = self._base_url + path
+        resp = self._session.get(url, params=params, timeout=10)
+        self._raise_for_binance_error(resp)
+        return resp.json()
+
+    def _signed_post(self, path: str, params: dict) -> dict:
+        """Authenticated POST request with HMAC signature."""
+        params = dict(params)
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        query = urlencode(params)
+        signature = hmac.new(
+            self._secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+        url = self._base_url + path
+        resp = self._session.post(url, params=params, timeout=10)
+        self._raise_for_binance_error(resp)
+        return resp.json()
+
+    def _signed_delete(self, path: str, params: dict) -> dict:
+        """Authenticated DELETE request with HMAC signature."""
+        params = dict(params)
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        query = urlencode(params)
+        signature = hmac.new(
+            self._secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+        url = self._base_url + path
+        resp = self._session.delete(url, params=params, timeout=10)
+        self._raise_for_binance_error(resp)
+        return resp.json()
+
+    def _raise_for_binance_error(self, resp: requests.Response) -> None:
+        """Raise a descriptive exception for Binance API errors."""
+        if resp.status_code == 200:
+            return
+        try:
+            body = resp.json()
+            code = body.get("code", resp.status_code)
+            msg = body.get("msg", resp.text)
+            raise Exception(f"Binance Demo API error {code}: {msg}")
+        except (ValueError, KeyError):
+            resp.raise_for_status()
 
     def _normalize_order(self, raw: dict) -> dict:
-        filled = _to_dec(raw.get("filled", 0))
-        requested = _to_dec(raw.get("amount", 0))
-        avg_price = _to_dec(raw.get("average") or raw.get("price") or 0)
-        status_raw = (raw.get("status") or "").lower()
-        if status_raw == "closed" and filled >= requested:
+        """Convert a Binance order response into a consistent format."""
+        filled = _to_dec(raw.get("executedQty", 0))
+        requested = _to_dec(raw.get("origQty", 0))
+
+        # Compute average fill price
+        cumulative_quote = _to_dec(raw.get("cummulativeQuoteQty", 0))
+        if filled > 0 and cumulative_quote > 0:
+            avg_price = cumulative_quote / filled
+        else:
+            avg_price = _to_dec(raw.get("price", 0))
+
+        status_raw = (raw.get("status") or "").upper()
+        if status_raw == "FILLED":
             status = "filled"
-        elif status_raw == "closed" and filled < requested:
+        elif status_raw == "PARTIALLY_FILLED":
             status = "partially_filled"
-        elif status_raw in ("canceled", "cancelled", "expired"):
+        elif status_raw in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
             status = "expired"
         else:
-            status = status_raw or "unknown"
+            status = status_raw.lower() or "unknown"
+
         return {
-            "id": str(raw.get("id", "")),
+            "id": str(raw.get("orderId", "")),
             "symbol": raw.get("symbol", ""),
-            "side": raw.get("side", ""),
-            "type": raw.get("type", ""),
+            "side": (raw.get("side") or "").lower(),
+            "type": (raw.get("type") or "").lower(),
             "time_in_force": raw.get("timeInForce", ""),
             "amount_requested": requested,
             "amount_filled": filled,
             "avg_fill_price": avg_price,
-            "fee": _to_dec((raw.get("fee") or {}).get("cost", 0)),
-            "fee_asset": (raw.get("fee") or {}).get("currency", ""),
+            "fee": Decimal("0"),   # Demo Trading does not return fee detail
+            "fee_asset": "",
             "status": status,
-            "timestamp": raw.get("timestamp") or int(time.time() * 1000)
+            "timestamp": raw.get("transactTime") or raw.get("time") or int(time.time() * 1000)
         }

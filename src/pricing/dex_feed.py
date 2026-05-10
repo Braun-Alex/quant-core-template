@@ -168,7 +168,7 @@ class DEXPriceFeed:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for pair, result in zip(self._pools.keys(), results):
             if isinstance(result, Exception):
-                log.debug("DEX poll error for %s: %s", pair, result)
+                log.info("DEX poll error for %s: %s", pair, result)
 
     async def _poll_pool(self, pair: str, pool) -> None:
         """Fetch reserves for one pool and fire callback if price changed."""
@@ -180,7 +180,7 @@ class DEXPriceFeed:
                 None, lambda: self._fetch_reserves(pool)
             )
         except Exception as exc:
-            log.debug("Reserve fetch failed for %s: %s", pair, exc)
+            log.info("Reserve fetch failed for %s: %s", pair, exc)
             return
 
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -189,7 +189,7 @@ class DEXPriceFeed:
         try:
             price = self._reserves_to_price(pool, r0, r1)
         except Exception as exc:
-            log.debug("Price computation failed for %s: %s", pair, exc)
+            log.info("Price computation failed for %s: %s", pair, exc)
             return
 
         snap = DEXPriceSnapshot(
@@ -215,7 +215,7 @@ class DEXPriceFeed:
 
         if changed:
             self._prev_prices[pair] = price
-            log.debug(
+            log.info(
                 "DEX price update | %s price=%.4f elapsed=%.0fms",
                 pair, float(price), elapsed_ms
             )

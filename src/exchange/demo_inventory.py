@@ -92,7 +92,7 @@ ARB_TOKENS = {
     ),
     "USDC": ArbitrumToken(
         symbol="USDC",
-        address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        address="0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
         decimals=6,
         balance_slot=9   # Circle USDC: slot 9
     ),
@@ -157,11 +157,11 @@ WHALES = {
 @dataclass
 class DemoInventory:
     """Target token balances for demo/simulation mode."""
-    eth_wei: int = int(10 * 10**18)   # 10 ETH for gas
+    eth_wei: int = int(0.3 * 10**18)   # 0.3 ETH for gas
     token_amounts: dict[str, int] = field(default_factory=lambda: {
-        "ARB": int(10_000 * 10**18),   # 10,000 ARB
-        "USDC": int(20_000 * 10**6),   # $20,000 USDC
-        "WETH": int(5 * 10**18),   # 5 WETH
+        "ARB": int(20_000 * 10**18),   # 20,000 ARB
+        "USDC": int(2_000 * 10**6),   # $2,000 USDC
+        "WETH": int(0.3 * 10**18),   # 0.3 WETH
         "MAGIC": int(5_000 * 10**18),   # 5,000 MAGIC
         "GMX": int(100 * 10 ** 18),   # 100 GMX
         "PENDLE": int(1_000 * 10**18)   # 1,000 PENDLE
@@ -307,7 +307,7 @@ class AnvilInventoryProvisioner:
                 # Restore to zero before next attempt
                 self._write_storage(addr, slot, 0)
             except Exception as exc:
-                log.debug("Slot %d probe failed: %s", slot, exc)
+                log.info("Slot %d probe failed: %s", slot, exc)
                 continue
 
         log.warning("Could not find balance slot for %s in first %d slots", addr, max_slots)

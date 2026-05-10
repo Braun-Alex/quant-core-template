@@ -153,7 +153,7 @@ class ExecutionRiskFilter:
         sigma = self._cfg.vol_per_sqrt_second * _d(math.sqrt(float(tau)))
         var_alpha = q * signal.cex_price * sigma * self._z_alpha
         approved = var_alpha < signal.expected_net_pnl
-        log.debug(
+        log.info(
             "RiskFilter VaR=%.6f pnl=%.6f ok=%s",
             float(var_alpha), float(signal.expected_net_pnl), approved
         )

@@ -69,28 +69,23 @@ pool-info:
 run-demo:
 	@echo "==> Starting Anvil fork of Arbitrum Mainnet..."
 	OPERATION_MODE=demo DRY_RUN=false $(DOCKER_COMPOSE) up -d anvil
-	@echo "==> Funding demo wallet with test tokens..."
-	$(APP_RUN) python3 -m src.exchange.demo_setup fund \
-		--wallet "${DEMO_WALLET_ADDRESS}" \
-		--rpc http://anvil:8545 \
-		--tokens ARB,USDC,WETH
 	@echo "==> Starting arbitrage bot in demo mode..."
 	OPERATION_MODE=demo DRY_RUN=false $(APP_RUN) python3 -m scripts.arb_bot
 
 # ====================== Arbitrage scenarios ======================
 
-# Run demo arb scenario (both price directions, 200 USDC)
+# Run demo arb scenario (both price directions, 3 USDC)
 # Bot must already be running: make run-demo
 arb-demo:
-	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction both --amount 200
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction both --amount 3
 
 # Run demo scenario pushing price UP only
 arb-demo-up:
-	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction up --amount 200
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction up --amount 3
 
 # Run demo scenario pushing price DOWN only
 arb-demo-down:
-	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction down --amount 200
+	$(APP_RUN) python3 -m scripts.arb_scenario_demo --direction down --amount 3
 
 # Run production arb scenario in DRY-RUN (build txs, do not send)
 arb-prod-dryrun:
@@ -98,7 +93,7 @@ arb-prod-dryrun:
 
 # Run production arb scenario with REAL funds - use with caution
 arb-prod:
-	$(APP_RUN) python3 -m scripts.arb_scenario_production --direction both --amount 5
+	$(APP_RUN) python3 -m scripts.arb_scenario_production --direction both --amount 3
 
 # ====================== Pool scout ======================
 

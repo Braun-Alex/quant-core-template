@@ -126,7 +126,7 @@ class BinanceClient:
                 continue
             result[asset] = {"free": free, "locked": locked, "total": total}
 
-        log.debug("fetch_balance: %d assets with non-zero balance", len(result))
+        log.info("fetch_balance: %d assets with non-zero balance", len(result))
         return result
 
     def create_limit_ioc_order(
@@ -175,12 +175,12 @@ class BinanceClient:
         import ccxt
 
         self._consume_weight(method)
-        log.debug("→ %s(%s)", method, args[:2] if args else "")
+        log.info("→ %s(%s)", method, args[:2] if args else "")
         t0 = time.monotonic()
 
         try:
             result = getattr(self._exchange, method)(*args, **kwargs)
-            log.debug("← %s OK (%.3fs)", method, time.monotonic() - t0)
+            log.info("← %s OK (%.3fs)", method, time.monotonic() - t0)
             return result
 
         except ccxt.RateLimitExceeded:

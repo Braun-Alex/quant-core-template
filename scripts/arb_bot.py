@@ -142,7 +142,7 @@ class ArbBot:
         self.inventory = VenueTracker([Venue.BINANCE, Venue.WALLET])
         self.pnl_engine = PnLTracker()
 
-        # ── Discord alerter ───────────────────────────────────
+        # ── Discord alerter ───────────────────────────
         self._alerter = DiscordAlerter(
             webhook_url=system_config.discord_webhook_url
         )
@@ -251,7 +251,7 @@ class ArbBot:
         )
 
         self.pairs: list[str] = [system_config.trading_pair]
-        self.trade_size: float = 0.01
+        self.trade_size: float = 0.3
         self.min_score_threshold: float = 0.55
         self.max_queue_depth: int = 10
         self.running = False
@@ -293,8 +293,8 @@ class ArbBot:
                 secret=cfg.cex.secret
             )
             log.info(
-                "CEX connected (BinanceDemoClient) | pair=%s rest=%s",
-                cfg.trading_pair, cfg.cex.demo_rest_url
+                "CEX connected (BinanceDemoClient) | pair=%s",
+                cfg.trading_pair
             )
             return client
         except Exception as exc:
@@ -314,7 +314,7 @@ class ArbBot:
             return
 
         pairs = self.pairs
-        is_testnet_ws = self._cfg.is_test   # Demo and production both use mainnet WS slot
+        is_testnet_ws = self._cfg.is_test
 
         try:
             self._cex_book = LiveOrderBook(
@@ -343,7 +343,7 @@ class ArbBot:
                     self._dex_feed = DEXPriceFeed(
                         chain_client=self._chain_client,
                         pools=pair_pools,
-                        poll_interval=float(os.getenv("DEX_POLL_INTERVAL_SECONDS", "1.0")),
+                        poll_interval=float(os.getenv("DEX_POLL_INTERVAL_SECONDS", "1.0"))
                     )
                     log.info(
                         "DEX poll feed initialized | pairs=%s rpc=%s",
@@ -361,7 +361,7 @@ class ArbBot:
                 on_price_update=self._on_price_update,
                 stale_threshold_seconds=float(
                     os.getenv("PRICE_STALE_THRESHOLD_SECONDS", "5.0")
-                ),
+                )
             )
             self.generator._price_feed_manager = self._feed_manager
             self._using_ws = True
@@ -439,14 +439,14 @@ class ArbBot:
 
         valid, reason = self._validator.validate_signal(sig)
         if not valid:
-            log.debug("FEED_VALIDATION_FAIL | %s | %s", sig.signal_id, reason)
+            log.info("FEED_VALIDATION_FAIL | %s | %s", sig.signal_id, reason)
             return
 
         qty = self._trading_rules.round_quantity(float(sig.kelly_size))
         price = self._trading_rules.round_price(float(sig.cex_price))
         order_ok, order_reason = self._trading_rules.validate_order(qty, price)
         if not order_ok:
-            log.debug("FEED_ORDER_FILTER | %s | %s", sig.signal_id, order_reason)
+            log.info("FEED_ORDER_FILTER | %s | %s", sig.signal_id, order_reason)
             return
 
         score = self.scorer.score(sig, self._get_skews())
@@ -470,7 +470,7 @@ class ArbBot:
             entry = heapq.heappop(self._pq)
             s = entry.signal
             if s.is_expired():
-                log.debug("Signal %s expired in queue", s.signal_id)
+                log.info("Signal %s expired in queue", s.signal_id)
                 continue
             await self._execute_signal(s)
             break
@@ -489,13 +489,14 @@ class ArbBot:
             f"Bot started | mode={self._cfg.mode.value} "
             f"dry_run={self._dry_run} pair={self._cfg.trading_pair}"
         )
-        asyncio.create_task(self._monitor.run_health_loop())
 
         if self._cfg.is_demo:
             await self._demo_setup()
 
         await self._sync_balances()
         self._init_feeds()
+
+        asyncio.create_task(self._monitor.run_health_loop())
 
         if self._using_ws and self._feed_manager:
             log.info("Running in EVENT-DRIVEN mode")
@@ -550,7 +551,7 @@ class ArbBot:
             return
 
         if self.circuit_breaker.is_open():
-            log.debug("CB OPEN - %.0fs", self.circuit_breaker.time_until_reset())
+            log.info("CB OPEN - %.0fs", self.circuit_breaker.time_until_reset())
 
     def stop(self) -> None:
         log.warning("Bot stop requested")
@@ -721,7 +722,7 @@ class ArbBot:
                 )
                 await self._alerter.trade_done(metrics)
             except Exception as exc:
-                log.debug("Discord trade notification failed: %s", exc)
+                log.info("Discord trade notification failed: %s", exc)
         else:
             self.scorer.record_result(sig.pair, success=False)
             self._risk_manager.record_error()
@@ -759,47 +760,86 @@ class ArbBot:
             self._risk_manager.record_error()
 
         # ── WALLET / DEX ────────────────────────────────────
-        if not (self._chain_client and self._wallet and self._dex_price):
-            return
+        if self._chain_client and self._wallet and self._dex_price:
+            try:
+                wallet_addr = Address(self._wallet.address)
+
+                # 1. ETH
+                eth_balance = self._chain_client.get_balance(wallet_addr)
+
+                # 2. Pool tokens
+                seen_tokens: dict[str, Token] = {}
+
+                for pool in self._dex_price._pools.values():
+                    for token in (pool.left, pool.right):
+                        key = token.address.checksum.lower()
+                        seen_tokens[key] = token
+
+                tokens = list(seen_tokens.values())
+
+                # 3. ERC20 batch
+                erc20_balances = self._chain_client.get_multiple_erc20_balances(
+                    tokens, wallet_addr
+                )
+
+                # 4. Union
+                wallet_balances: dict[str, float] = {
+                    eth_balance.symbol: float(eth_balance.human)
+                }
+                for symbol, amount in erc20_balances.items():
+                    wallet_balances[symbol] = float(amount.human)
+
+                # 5. Update inventory
+                self.inventory.update_from_wallet(Venue.WALLET, wallet_balances)
+
+            except Exception as exc:
+                log.warning("Wallet balance sync failed: %s", exc)
+                self._risk_manager.record_error()
+
+        # ── Sync RiskManager capital from real balances ──────────────────
+        # Build a price map for non-stable assets using the latest DEX prices
+        price_map: dict[str, float] = {}
+        STABLES = {"USDC", "USDT", "BUSD", "DAI"}
 
         try:
-            wallet_addr = Address(self._wallet.address)
-
-            # 1. ETH
-            eth_balance = self._chain_client.get_balance(wallet_addr)
-
-            # 2. Унікальні токени з пулів
-            seen_tokens: dict[str, Token] = {}
-
-            for pool in self._dex_price._pools.values():
-                for token in (pool.left, pool.right):
-                    seen_tokens[token.address.lower] = token
-
-            tokens = list(seen_tokens.values())
-
-            # 3. ERC20 батч (логічний)
-            erc20_balances = self._chain_client.get_multiple_erc20_balances(
-                tokens,
-                wallet_addr
-            )
-
-            # 4. Об’єднання
-            wallet_balances: dict[str, float] = {
-                eth_balance.symbol: float(eth_balance.human)
-            }
-
-            for symbol, amount in erc20_balances.items():
-                wallet_balances[symbol] = float(amount.human)
-
-            # 5. Update inventory
-            self.inventory.update_from_wallet(
-                Venue.WALLET,
-                wallet_balances
-            )
-
+            if self._dex_price and self._dex_price._pools:
+                for pool in self._dex_price._pools.values():
+                    for token in (pool.left, pool.right):
+                        sym = token.symbol.upper()
+                        if sym in STABLES:
+                            price_map[sym] = 1.0
+                            continue
+                        other = pool.right if token == pool.left else pool.left
+                        other_sym = other.symbol.upper()
+                        if other_sym in STABLES and sym not in price_map:
+                            try:
+                                # Convert to human: multiply by decimal factor
+                                raw_price = pool.marginal_price(token)
+                                human_price = float(raw_price) * (
+                                    10 ** token.decimals / 10 ** other.decimals
+                                )
+                                if human_price > 0:
+                                    price_map[sym] = human_price
+                                    log.info(
+                                        "Price map: %s=$%.4f (from pool)", sym, human_price
+                                    )
+                            except Exception as pe:
+                                log.info("Price map for %s failed: %s", sym, pe)
         except Exception as exc:
-            log.warning("Wallet balance sync failed: %s", exc)
-            self._risk_manager.record_error()
+            log.info("Price map construction failed: %s", exc)
+
+        tracked_symbols: set[str] = set()
+
+        if self._dex_price and self._dex_price._pools:
+            for pool in self._dex_price._pools.values():
+                tracked_symbols.add(pool.left.symbol.upper())
+                tracked_symbols.add(pool.right.symbol.upper())
+
+        # Sync capital
+        new_capital = self._risk_manager.sync_capital_from_inventory(
+            self.inventory, price_map, tracked_symbols
+        )
+        log.info("Capital after balance sync: $%.2f", new_capital)
 
     def _get_skews(self) -> list[dict]:
         try:

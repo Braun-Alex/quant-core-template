@@ -148,8 +148,6 @@ class SystemConfig:
     dex_swap_bps: Decimal = Decimal("30")
     gas_cost_usd: Decimal = Decimal("0.10")
     trading_pair: str = "ARB/USDC"
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
     discord_webhook_url: str = ""
     log_dir: str = "logs"
     dry_run: bool = True
@@ -254,7 +252,7 @@ class SystemConfig:
             consecutive_loss_limit=int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3")),
             max_spread_bps=float(os.getenv("MAX_SPREAD_BPS", "500.0")),
             max_signal_age_seconds=float(os.getenv("MAX_SIGNAL_AGE_SECONDS", "5.0")),
-            initial_capital=float(os.getenv("INITIAL_CAPITAL", "100.0"))
+            initial_capital=float(os.getenv("INITIAL_CAPITAL", "0.0"))
         )
 
         return cls(
@@ -267,8 +265,6 @@ class SystemConfig:
             dex_swap_bps=Decimal(os.getenv("DEX_SWAP_BPS", "30")),
             gas_cost_usd=Decimal(os.getenv("GAS_COST_USD", "0.10")),
             trading_pair=os.getenv("TRADING_PAIR", "ETH/USDC"),
-            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
             log_dir=os.getenv("LOG_DIR", "logs"),
             dry_run=dry_run

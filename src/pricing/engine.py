@@ -104,8 +104,7 @@ class PricingEngine:
         for addr in addresses:
             state = PoolState.load(addr, self._client)
             self._pools[addr] = state
-            log.debug("Registered pool %s  %s/%s",
-                      addr, state.left.symbol, state.right.symbol)
+            log.info("Registered pool %s  %s/%s", addr, state.left.symbol, state.right.symbol)
         self._finder = PathFinder(list(self._pools.values()))
         log.info("Pool registry ready (%d pools).", len(self._pools))
 
@@ -121,7 +120,7 @@ class PricingEngine:
         stored.qty_left = fresh.qty_left
         stored.qty_right = fresh.qty_right
         stored.fee_bps = fresh.fee_bps
-        log.debug("Refreshed %s: L=%d R=%d", addr, stored.qty_left, stored.qty_right)
+        log.info("Refreshed %s: L=%d R=%d", addr, stored.qty_left, stored.qty_right)
 
     # ------------------------------------------------------------------
     # Quote
@@ -147,7 +146,7 @@ class PricingEngine:
         except ValueError as exc:
             raise PricingError(str(exc)) from exc
 
-        receipt = self._simulator.verify_path(path, qty_in, _SIMULATION_SENDER)
+        receipt = self._simulator.verify_path(path, qty_in)
         if not receipt.ok:
             raise PricingError(f"Fork verification failed: {receipt.error}")
 

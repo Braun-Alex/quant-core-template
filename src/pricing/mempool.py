@@ -146,7 +146,7 @@ class MempoolWatcher:
             if swap is not None:
                 self.handler(swap)
         except Exception as exc:
-            log.debug("Skipping %s: %s", tx_hash, exc)
+            log.info("Skipping %s: %s", tx_hash, exc)
 
     def decode(self, tx: dict) -> PendingSwap | None:
         """
@@ -177,7 +177,7 @@ class MempoolWatcher:
         try:
             fields = self._decode_body(selector, body)
         except Exception as exc:
-            log.debug("ABI decode failed for %s: %s", selector, exc)
+            log.info("ABI decode failed for %s: %s", selector, exc)
             return None
 
         # ETH-in swaps carry their input amount in tx.value
@@ -204,7 +204,7 @@ class MempoolWatcher:
                 gas_price = gas_price
             )
         except Exception as exc:
-            log.debug("Could not build PendingSwap: %s", exc)
+            log.info("Could not build PendingSwap: %s", exc)
             return None
 
     @staticmethod

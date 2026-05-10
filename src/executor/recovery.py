@@ -79,7 +79,7 @@ class SPRTCircuitBreaker:
         self._B = _d(math.log(float((_ONE - cfg.beta) / cfg.alpha)))
         self._A = _d(math.log(float(cfg.beta / (_ONE - cfg.alpha))))
 
-        log.debug("SPRT A=%.4f B=%.4f", float(self._A), float(self._B))
+        log.info("SPRT A=%.4f B=%.4f", float(self._A), float(self._B))
 
     # ------------------------------------------------------------------
     # Public
@@ -131,8 +131,7 @@ class SPRTCircuitBreaker:
         self._lambda = self._cfg.gamma * self._lambda + increment
         self._lambda = max(self._lambda, self._A)
         self._total_obs += 1
-        log.debug("SPRT Lambda=%.4f (A=%.4f B=%.4f)",
-                  float(self._lambda), float(self._A), float(self._B))
+        log.info("SPRT Lambda=%.4f (A=%.4f B=%.4f)", float(self._lambda), float(self._A), float(self._B))
         if self._lambda <= self._A and self._tripped_at is not None:
             log.info("SPRT reset boundary reached.")
             self._reset()

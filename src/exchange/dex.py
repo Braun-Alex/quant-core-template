@@ -172,7 +172,7 @@ class DEXPriceSource:
         try:
             return self._quote_via_engine(pool, base, size)
         except Exception as exc:
-            log.debug("Engine quote failed (%s), falling back to AMM formula", exc)
+            log.info("Engine quote failed (%s), falling back to AMM formula", exc)
             return self._quote_via_amm(pool, base)
 
     def get_full_quote(

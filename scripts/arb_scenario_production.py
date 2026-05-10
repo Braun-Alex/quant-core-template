@@ -58,8 +58,8 @@ ROUTER_ADDRESS = os.getenv("UNISWAP_V2_ROUTER", "0x4752ba5dbc23f44d87826276bf6fd
 ARB_TOKEN = "0x912CE59144191C1204E64559FE8253a0e49E6548"
 USDC_TOKEN = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
-# $5 of the $100 wallet moves the pool
-DEFAULT_AMOUNT = 5   # USDC
+# $1 moves the pool
+DEFAULT_AMOUNT = 1   # USDC
 
 ERC20_ABI = [
     {"name": "approve", "type": "function",
@@ -272,7 +272,7 @@ async def notify(msg: str, critical: bool = False) -> None:
         else:
             await alerter.info(msg)
     except Exception as exc:
-        log.debug("Discord notify failed: %s", exc)
+        log.info("Discord notify failed: %s", exc)
 
 
 # ── Main scenario ─────────────────────────────────────────────────────────────

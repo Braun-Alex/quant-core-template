@@ -249,7 +249,7 @@ class PriceFeedManager:
         state.update_cex(snap)
         state.recompute(self._stale)
 
-        log.debug(
+        log.info(
             "CEX update | %s bid=%.4f ask=%.4f spread=%.2fbps seq=%d",
             matched_pair,
             float(state.cex_bid), float(state.cex_ask),
@@ -272,7 +272,7 @@ class PriceFeedManager:
         state.update_dex(snap)
         state.recompute(self._stale)
 
-        log.debug(
+        log.info(
             "DEX update | %s price=%.4f latency=%.0fms",
             pair, float(snap.price), snap.block_time_ms
         )

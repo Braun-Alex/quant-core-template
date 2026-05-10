@@ -165,7 +165,7 @@ class BalanceVerifier:
                 self._stop()
             return False
 
-        log.debug("Balance verification OK | assets=%s", assets)
+        log.info("Balance verification OK | assets=%s", assets)
         return True
 
     async def _check_onchain_balances(
@@ -193,7 +193,7 @@ class BalanceVerifier:
                             f"actual={actual:.6f} diff={diff:.6f}"
                         )
                 except Exception as exc:
-                    log.debug("On-chain balance check for %s failed: %s", asset, exc)
+                    log.info("On-chain balance check for %s failed: %s", asset, exc)
 
 
 # ---------------------------------------------------------------------------
