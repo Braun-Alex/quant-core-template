@@ -95,20 +95,6 @@ arb-prod-dryrun:
 arb-prod:
 	$(APP_RUN) python3 -m scripts.arb_scenario_production --direction both --amount 3
 
-# ====================== Pool scout ======================
-
-# Run pool intelligence scout (LLM analysis of ARB/USDC pool)
-scout:
-	$(APP_RUN) python3 -m src.pricing.pool_scout
-
-# Scout on Anvil fork (demo mode)
-scout-demo:
-	$(APP_RUN) python3 -m src.pricing.pool_scout --rpc http://anvil:8545
-
-# Scout without LLM (fast, no OpenAI call)
-scout-fast:
-	$(APP_RUN) python3 -m src.pricing.pool_scout --no-llm
-
 # ====================== Mode helpers ======================
 
 # Print current operation mode
