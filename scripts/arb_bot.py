@@ -199,7 +199,7 @@ class ArbBot:
             inventory_tracker=self.inventory,
             fee_structure=self.fees,
             config=SignalGeneratorConfig(
-                alpha=Decimal("0.10"),
+                alpha=Decimal("0.50"),
                 kelly_fraction=system_config.kelly_fraction,
                 max_position_usd=system_config.max_position_usd,
                 signal_ttl_seconds=system_config.signal_ttl_seconds,
@@ -251,7 +251,7 @@ class ArbBot:
         )
 
         self.pairs: list[str] = [system_config.trading_pair]
-        self.trade_size: float = 0.3
+        self.trade_size: float = 120
         self.min_score_threshold: float = 0.55
         self.max_queue_depth: int = 10
         self.running = False

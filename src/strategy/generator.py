@@ -1,9 +1,5 @@
 """
 Bayesian Kalman Spread Estimator.
-
-Fetches CEX prices from BinanceClient and DEX prices from DEXPriceSource
-(real on-chain data via Uniswap V2 pools). Falls back to mid-price
-approximation when no DEX source is available.
 """
 
 from __future__ import annotations
@@ -16,9 +12,9 @@ from dataclasses import dataclass
 from decimal import Decimal, getcontext, ROUND_HALF_EVEN
 from typing import Optional
 
+from src.inventory.tracker import Venue
 from src.strategy.signal import Direction, KalmanState, Signal
 
-# Optional import - only used when PriceFeedManager is connected
 try:
     from src.exchange.price_feed import PriceState
 except ImportError:
@@ -35,15 +31,17 @@ _TEN_THOU = Decimal("10000")
 _EPS = Decimal("1E-12")
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # Fee structure
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 @dataclass
 class FeeStructure:
     cex_taker_bps: Decimal = Decimal("10")
     dex_swap_bps: Decimal = Decimal("30")
-    gas_cost_usd: Decimal = Decimal("0.1")
+
+    # Lower default for simulation/demo
+    gas_cost_usd: Decimal = Decimal("0.01")
 
     def __post_init__(self) -> None:
         self.cex_taker_bps = Decimal(str(self.cex_taker_bps))
@@ -53,41 +51,71 @@ class FeeStructure:
     def total_fee_bps(self, trade_value_usd: Decimal) -> Decimal:
         if trade_value_usd <= _ZERO:
             return Decimal("Inf")
+
         gas_bps = (self.gas_cost_usd / trade_value_usd) * _TEN_THOU
-        return self.cex_taker_bps + self.dex_swap_bps + gas_bps
+
+        log.info(f"Gas cost: {self.gas_cost_usd}$ | trade value: {trade_value_usd}$")
+
+        total = (
+            self.cex_taker_bps
+            + self.dex_swap_bps
+            + gas_bps
+        )
+
+        log.info(
+            "Fee model | trade_value=%.6f gas_bps=%.4f "
+            "cex_bps=%.4f dex_bps=%.4f total_bps=%.4f",
+            float(trade_value_usd),
+            float(gas_bps),
+            float(self.cex_taker_bps),
+            float(self.dex_swap_bps),
+            float(total)
+        )
+
+        return total
 
     def breakeven_log_spread(self, trade_value_usd: Decimal) -> Decimal:
-        """Minimum log-spread to break even (threshold c in the Bayesian test)."""
-        return self.total_fee_bps(trade_value_usd) / _TEN_THOU
+        threshold = self.total_fee_bps(trade_value_usd) / _TEN_THOU
+
+        log.info(
+            "Break-even spread | trade_value=%.6f threshold=%.8f",
+            float(trade_value_usd),
+            float(threshold)
+        )
+
+        return threshold
 
 
-# ---------------------------------------------------------------------------
-# Kalman filter
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Kalman Filter
+# ============================================================================
 
 class KalmanSpreadFilter:
-    """Online Kalman filter for log-spread estimation."""
-
     def __init__(
         self,
         init_Q: Decimal = Decimal("1E-5"),
         init_R: Decimal = Decimal("1E-4"),
         em_window: int = 50
     ) -> None:
+
         self._state = KalmanState(
             mean=Decimal("0"),
             variance=Decimal("1"),
             process_noise=Decimal(str(init_Q)),
             observation_noise=Decimal(str(init_R))
         )
+
         self._em_window = em_window
-        self._buf: deque[tuple[Decimal, Decimal, Decimal, Decimal, Decimal]] = deque(
-            maxlen=em_window
-        )
+
+        self._buf: deque[
+            tuple[Decimal, Decimal, Decimal, Decimal, Decimal]
+        ] = deque(maxlen=em_window)
+
         self._last_zscore: Decimal = Decimal("0")
 
     def update(self, z_float: float) -> KalmanState:
         z = Decimal(str(z_float))
+
         Q = self._state.process_noise
         R = self._state.observation_noise
 
@@ -96,17 +124,26 @@ class KalmanSpreadFilter:
 
         innov = z - prior_mean
         innov_var = prior_var + R
+
         K = prior_var / max(innov_var, _EPS)
+
         post_mean = prior_mean + K * innov
         post_var = (_ONE - K) * prior_var
 
-        innov_std = Decimal(str(math.sqrt(float(max(innov_var, _EPS)))))
+        innov_std = Decimal(
+            str(math.sqrt(float(max(innov_var, _EPS))))
+        )
+
         zscore = innov / max(innov_std, _EPS)
 
-        self._buf.append((z, prior_mean, prior_var, post_mean, post_var))
+        self._buf.append(
+            (z, prior_mean, prior_var, post_mean, post_var)
+        )
+
         self._last_zscore = zscore
 
-        new_tick = self._state.tick + 1
+        tick = self._state.tick + 1
+
         self._state = KalmanState(
             mean=post_mean,
             variance=max(post_var, _EPS),
@@ -114,10 +151,24 @@ class KalmanSpreadFilter:
             observation_noise=R,
             innovation=innov,
             kalman_gain=K,
-            tick=new_tick
+            tick=tick
         )
 
-        if new_tick % self._em_window == 0 and len(self._buf) == self._em_window:
+        log.info(
+            "Kalman update | tick=%d z=%.8f prior_mean=%.8f "
+            "post_mean=%.8f variance=%.8f innovation=%.8f "
+            "zscore=%.4f K=%.6f",
+            tick,
+            float(z),
+            float(prior_mean),
+            float(post_mean),
+            float(post_var),
+            float(innov),
+            float(zscore),
+            float(K)
+        )
+
+        if tick % self._em_window == 0:
             self._em_update()
 
         return self._state
@@ -138,20 +189,34 @@ class KalmanSpreadFilter:
             ((z - pm) ** 2 - pv for z, pm, pv, _, _ in buf),
             start=Decimal("0")
         )
+
         new_R = max(r_acc / n, Decimal("1E-8"))
 
         q_acc = Decimal("0")
+
         for i in range(1, len(buf)):
             _, _, pv_prior, pm_cur, pv_cur = buf[i]
             _, _, _, pm_prev, _ = buf[i - 1]
-            q_acc += pv_cur + (pm_cur - pm_prev) ** 2 - pv_prior
-        new_Q = max(q_acc / max(n - _ONE, Decimal("1")), Decimal("1E-9"))
+
+            q_acc += (
+                pv_cur
+                + (pm_cur - pm_prev) ** 2
+                - pv_prior
+            )
+
+        new_Q = max(
+            q_acc / max(n - _ONE, Decimal("1")),
+            Decimal("1E-9")
+        )
 
         log.info(
-            "EM: Q %.2e->%.2e  R %.2e->%.2e",
-            float(self._state.process_noise), float(new_Q),
-            float(self._state.observation_noise), float(new_R)
+            "EM update | Q %.2e -> %.2e | R %.2e -> %.2e",
+            float(self._state.process_noise),
+            float(new_Q),
+            float(self._state.observation_noise),
+            float(new_R)
         )
+
         self._state = KalmanState(
             mean=self._state.mean,
             variance=self._state.variance,
@@ -163,45 +228,48 @@ class KalmanSpreadFilter:
         )
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # Config
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 @dataclass
 class SignalGeneratorConfig:
-    alpha: Decimal = Decimal("0.10")
+
+    alpha: Decimal = Decimal("0.30")
     kelly_fraction: Decimal = Decimal("0.25")
     max_position_usd: Decimal = Decimal("10000")
     signal_ttl_seconds: Decimal = Decimal("5")
-    cooldown_seconds: Decimal = Decimal("2")
+    cooldown_seconds: Decimal = Decimal("0")
     inventory_buffer: Decimal = Decimal("0.01")
     em_window: int = 50
     init_Q: Decimal = Decimal("1E-5")
     init_R: Decimal = Decimal("1E-4")
     anomaly_zscore_threshold: Decimal = Decimal("3")
-    # DEX price offset applied in simulation / fallback mode (fraction)
-    dex_premium_fraction: Decimal = Decimal("0.003")   # 0.3% above mid
-    dex_discount_fraction: Decimal = Decimal("0.006")   # 0.6% below mid for sale
+    dex_premium_fraction: Decimal = Decimal("0.003")
+    dex_discount_fraction: Decimal = Decimal("0.006")
 
     def __post_init__(self) -> None:
         for f in (
-            "alpha", "kelly_fraction", "max_position_usd",
-            "signal_ttl_seconds", "cooldown_seconds",
-            "inventory_buffer", "init_Q", "init_R",
+            "alpha",
+            "kelly_fraction",
+            "max_position_usd",
+            "signal_ttl_seconds",
+            "cooldown_seconds",
+            "inventory_buffer",
+            "init_Q",
+            "init_R",
             "anomaly_zscore_threshold",
-            "dex_premium_fraction", "dex_discount_fraction"
+            "dex_premium_fraction",
+            "dex_discount_fraction"
         ):
             setattr(self, f, Decimal(str(getattr(self, f))))
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # Signal Generator
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 class SignalGenerator:
-    """
-    Bayesian Kalman Spread Estimator.
-    """
 
     def __init__(
         self,
@@ -210,8 +278,9 @@ class SignalGenerator:
         inventory_tracker,
         fee_structure: FeeStructure,
         config: Optional[SignalGeneratorConfig] = None,
-        dex_price_source=None   # DEXPriceSource instance (optional)
+        dex_price_source=None
     ) -> None:
+
         self._exchange = exchange_client
         self._pricing = pricing_engine
         self._inventory = inventory_tracker
@@ -221,67 +290,52 @@ class SignalGenerator:
 
         self._filters: dict[str, KalmanSpreadFilter] = {}
         self._last_signal_time: dict[str, Decimal] = {}
-        # Injected by ArbBot when WebSocket feeds are active
-        self._price_feed_manager = None
 
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
-    def generate(self, pair: str, size) -> Optional[Signal]:
-        size = Decimal(str(size))
-
-        if self._in_cooldown(pair):
-            return None
-
-        prices = self._fetch_prices(pair, size)
-        if prices is None:
-            return None
-        return self._generate_from_prices(pair, size, prices)
-
-    def get_filter_state(self, pair: str) -> Optional[KalmanState]:
-        return self._filters[pair].state if pair in self._filters else None
-
-    # ------------------------------------------------------------------
-    # Feed-driven generation (event-based, no REST call)
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
 
     def generate_from_feed(
-        self, pair: str, size, price_state
+        self,
+        pair: str,
+        size,
+        price_state
     ) -> Optional[Signal]:
-        """
-        Generate a signal using prices already in ``price_state``
-        (from PriceFeedManager) instead of making a REST call.
 
-        Called reactively on every CEX/DEX price update.
-
-        Parameters
-        ----------
-        pair        : trading pair, e.g. "ETH/USDC"
-        size        : trade size in base-asset units
-        price_state : PriceState from PriceFeedManager
-        """
         size = Decimal(str(size))
 
         if self._in_cooldown(pair):
+            log.info("%s skipped | cooldown active", pair)
             return None
 
         if not price_state.is_valid:
+            log.info("%s skipped | invalid price state", pair)
             return None
 
         cex_bid = price_state.cex_bid
         cex_ask = price_state.cex_ask
         dex_price = price_state.dex_price
 
-        if cex_bid <= _ZERO or cex_ask <= _ZERO or dex_price <= _ZERO:
-            return None
+        fee_factor = (
+            _ONE
+            - Decimal(str(price_state.dex_fee_bps)) / _TEN_THOU
+        )
 
-        # For Uniswap V2: marginal price = reserves_quote / reserves_base
-        # dex_buy  = price to buy base on DEX (DEX ask-side)
-        # dex_sell = price to sell base on DEX (DEX bid-side, ≈ dex_price × (1-fee))
-        fee_factor = _ONE - Decimal(str(price_state.dex_fee_bps)) / _TEN_THOU
-        dex_sell = dex_price * fee_factor   # What DEX pays when we sell base
-        dex_buy = dex_price / fee_factor   # What DEX charges when we buy base
+        dex_sell = dex_price * fee_factor
+        dex_buy = dex_price / fee_factor
+
+        log.info(
+            "[FEED] %s "
+            "cex_bid=%.6f "
+            "cex_ask=%.6f "
+            "dex=%.6f "
+            "dex_buy=%.6f "
+            "dex_sell=%.6f",
+            pair,
+            float(cex_bid),
+            float(cex_ask),
+            float(dex_price),
+            float(dex_buy),
+            float(dex_sell)
+        )
 
         prices = {
             "cex_bid": cex_bid,
@@ -290,123 +344,274 @@ class SignalGenerator:
             "dex_sell": dex_sell
         }
 
-        log.info(
-            "[FEED] %s cex_bid=%.4f cex_ask=%.4f dex=%.4f dex_buy=%.4f dex_sell=%.4f",
-            pair, float(cex_bid), float(cex_ask), float(dex_price),
-            float(dex_buy), float(dex_sell)
-        )
-
         return self._generate_from_prices(pair, size, prices)
 
-    # ------------------------------------------------------------------
-    # Private
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
 
     def _generate_from_prices(
-        self, pair: str, size: Decimal, prices: dict
+        self,
+        pair: str,
+        size: Decimal,
+        prices: dict
     ) -> Optional[Signal]:
-        """
-        Core signal generation logic shared by generate() and generate_from_feed().
-        ``prices`` must have keys: cex_bid, cex_ask, dex_buy, dex_sell.
-        """
+
         cex_bid = prices["cex_bid"]
         cex_ask = prices["cex_ask"]
+
         dex_buy = prices["dex_buy"]
         dex_sell = prices["dex_sell"]
 
-        z_A = self._log_spread(dex_sell, cex_ask)   # BUY_CEX_SELL_DEX
-        z_B = self._log_spread(cex_bid, dex_buy)   # BUY_DEX_SELL_CEX
+        z_A = self._log_spread(dex_sell, cex_ask)
+        z_B = self._log_spread(cex_bid, dex_buy)
+
+        log.info(
+            "%s spreads | "
+            "z_A=%.8f BUY_CEX_SELL_DEX | "
+            "z_B=%.8f BUY_DEX_SELL_CEX",
+            pair,
+            float(z_A or 0),
+            float(z_B or 0)
+        )
 
         if z_A is None and z_B is None:
+            log.info("%s rejected | invalid spreads", pair)
             return None
 
         if (z_A or Decimal("-Inf")) >= (z_B or Decimal("-Inf")):
-            best_z, direction, ref_cex, ref_dex = (
-                z_A, Direction.BUY_CEX_SELL_DEX, cex_ask, dex_sell
-            )
+
+            best_z = z_A
+            direction = Direction.BUY_CEX_SELL_DEX
+
+            ref_cex = cex_ask
+            ref_dex = dex_sell
+
         else:
-            best_z, direction, ref_cex, ref_dex = (
-                z_B, Direction.BUY_DEX_SELL_CEX, cex_bid, dex_buy
-            )
+            best_z = z_B
+            direction = Direction.BUY_DEX_SELL_CEX
+
+            ref_cex = cex_bid
+            ref_dex = dex_buy
 
         if best_z is None:
+            log.info("%s rejected | no valid spread", pair)
             return None
 
+        log.info(
+            "%s selected | direction=%s best_z=%.8f",
+            pair,
+            direction.name,
+            float(best_z)
+        )
+
         kf = self._get_or_create_filter(pair)
+
         state = kf.update(float(best_z))
+
+        mu = state.mean
+
+        sigma = Decimal(
+            str(math.sqrt(float(max(state.variance, _EPS))))
+        )
+
         zscore = kf.last_innovation_zscore
 
         trade_value = size * ref_cex
+
         c = self._fees.breakeven_log_spread(trade_value)
 
-        mu = state.mean
-        sigma = Decimal(str(math.sqrt(float(max(state.variance, _EPS)))))
-        if sigma <= _ZERO:
-            return None
-
         z_stat = (mu - c) / sigma
+
         confidence = self._normal_cdf(z_stat)
 
+        log.info(
+            "%s Bayesian gate | "
+            "mu=%.8f sigma=%.8f "
+            "threshold=%.8f z_stat=%.8f "
+            "confidence=%.6f required=%.6f",
+            pair,
+            float(mu),
+            float(sigma),
+            float(c),
+            float(z_stat),
+            float(confidence),
+            float(_ONE - self._cfg.alpha)
+        )
+
         if confidence < (_ONE - self._cfg.alpha):
+
+            log.info(
+                "%s rejected | low confidence %.6f < %.6f",
+                pair,
+                float(confidence),
+                float(_ONE - self._cfg.alpha)
+            )
+
             return None
 
-        kelly_size = self._kelly_size(mu, c, sigma, ref_cex, pair, direction, size)
+        kelly_size = self._kelly_size(
+            mu,
+            c,
+            sigma,
+            ref_cex,
+            pair,
+            direction,
+            size
+        )
+
+        log.info(
+            "%s Kelly sizing | requested=%.6f actual=%.6f",
+            pair,
+            float(size),
+            float(kelly_size)
+        )
+
         if kelly_size <= _ZERO:
+            log.debug("%s rejected | zero Kelly size", pair)
             return None
 
         actual_trade_value = kelly_size * ref_cex
+
         exp_mu = Decimal(str(math.exp(float(mu))))
-        gross_pnl = (exp_mu - _ONE) * actual_trade_value
+
+        gross_pnl = (
+            (exp_mu - _ONE)
+            * actual_trade_value
+        )
+
         fee_bps = self._fees.total_fee_bps(actual_trade_value)
-        fee_cost = (fee_bps / _TEN_THOU) * actual_trade_value
+
+        fee_cost = (
+            fee_bps / _TEN_THOU
+        ) * actual_trade_value
+
         net_pnl = gross_pnl - fee_cost
 
+        log.info(
+            "%s PnL | gross=%.8f fee_cost=%.8f "
+            "net=%.8f trade_value=%.8f",
+            pair,
+            float(gross_pnl),
+            float(fee_cost),
+            float(net_pnl),
+            float(actual_trade_value)
+        )
+
         if net_pnl <= _ZERO:
+
+            log.info(
+                "%s rejected | negative pnl %.8f",
+                pair,
+                float(net_pnl)
+            )
+
             return None
 
-        exp_best_z = Decimal(str(math.exp(float(best_z))))
-        raw_spread_bps = (exp_best_z - _ONE) * _TEN_THOU
+        inventory_ok = self._check_inventory(
+            pair,
+            direction,
+            kelly_size,
+            ref_cex
+        )
 
-        inventory_ok = self._check_inventory(pair, direction, kelly_size, ref_cex)
-        within_limits = actual_trade_value <= self._cfg.max_position_usd
+        if not inventory_ok:
+            log.info("%s rejected | insufficient inventory", pair)
+            return None
+
+        raw_spread_bps = (
+            Decimal(str(math.exp(float(best_z))))
+            - _ONE
+        ) * _TEN_THOU
 
         sig = Signal.create(
-            pair=pair, direction=direction,
-            cex_price=ref_cex, dex_price=ref_dex,
-            raw_spread_bps=raw_spread_bps, filtered_spread=mu,
+            pair=pair,
+            direction=direction,
+            cex_price=ref_cex,
+            dex_price=ref_dex,
+            raw_spread_bps=raw_spread_bps,
+            filtered_spread=mu,
             posterior_variance=state.variance,
             signal_confidence=confidence,
-            kelly_size=kelly_size, expected_net_pnl=net_pnl,
+            kelly_size=kelly_size,
+            expected_net_pnl=net_pnl,
             ttl_seconds=self._cfg.signal_ttl_seconds,
-            inventory_ok=inventory_ok, within_limits=within_limits,
-            innovation_zscore=zscore, kalman_state=state
+            inventory_ok=True,
+            within_limits=True,
+            innovation_zscore=zscore,
+            kalman_state=state
+        )
+
+        log.info(
+            "SIGNAL GENERATED | %s | dir=%s "
+            "spread=%.4f bps | confidence=%.4f "
+            "size=%.6f | expected_pnl=%.6f",
+            pair,
+            direction.name,
+            float(raw_spread_bps),
+            float(confidence),
+            float(kelly_size),
+            float(net_pnl)
         )
 
         self._last_signal_time[pair] = Decimal(str(time.time()))
+
         return sig
 
-    def _get_or_create_filter(self, pair: str) -> KalmanSpreadFilter:
+    # ---------------------------------------------------------------------
+
+    def _get_or_create_filter(
+        self,
+        pair: str
+    ) -> KalmanSpreadFilter:
+
         if pair not in self._filters:
+
+            log.info("Creating Kalman filter for %s", pair)
+
             self._filters[pair] = KalmanSpreadFilter(
                 init_Q=self._cfg.init_Q,
                 init_R=self._cfg.init_R,
                 em_window=self._cfg.em_window
             )
+
         return self._filters[pair]
 
+    # ---------------------------------------------------------------------
+
     def _in_cooldown(self, pair: str) -> bool:
+
         last = self._last_signal_time.get(pair, Decimal("0"))
-        return Decimal(str(time.time())) - last < self._cfg.cooldown_seconds
+
+        delta = Decimal(str(time.time())) - last
+
+        active = delta < self._cfg.cooldown_seconds
+
+        if active:
+            log.info(
+                "%s cooldown | remaining=%.4f",
+                pair,
+                float(self._cfg.cooldown_seconds - delta)
+            )
+
+        return active
+
+    # ---------------------------------------------------------------------
 
     @staticmethod
     def _log_spread(
-        numerator: Decimal, denominator: Decimal
+        numerator: Decimal,
+        denominator: Decimal
     ) -> Optional[Decimal]:
+
         if denominator <= _ZERO or numerator <= _ZERO:
             return None
+
         try:
-            return Decimal(str(math.log(float(numerator / denominator))))
-        except (ValueError, OverflowError):
+            return Decimal(
+                str(math.log(float(numerator / denominator)))
+            )
+
+        except Exception as exc:
+            log.warning(f"Failed to determine log spread: {exc}")
             return None
 
     def _fetch_prices(self, pair: str, size: Decimal) -> Optional[dict[str, Decimal]]:
@@ -526,11 +731,18 @@ class SignalGenerator:
             return _ZERO
 
         base, quote = pair.split("/")
+
         try:
             if direction == Direction.BUY_CEX_SELL_DEX:
-                w_usd = Decimal(str(self._inventory.available(None, quote) or 0))
+                # Need quote asset on CEX
+                w_usd = Decimal(str(
+                    self._inventory.available(Venue.BINANCE, quote) or 0
+                ))
             else:
-                w_usd = Decimal(str(self._inventory.available(None, base) or 0)) * price
+                # Need base asset on DEX wallet
+                w_usd = Decimal(str(
+                    self._inventory.available(Venue.WALLET, base) or 0
+                )) * price
         except Exception:
             w_usd = _ZERO
 
@@ -570,29 +782,44 @@ class SignalGenerator:
         base, quote = pair.split("/")
         try:
             if direction == Direction.BUY_CEX_SELL_DEX:
-                quote_ok = (
-                    Decimal(str(self._inventory.available(None, quote) or 0))
-                    >= size * price * buf
+                cex_quote_ok = (
+                        Decimal(str(
+                            self._inventory.available(Venue.BINANCE, quote) or 0
+                        ))
+                        >= size * price * buf
                 )
-                base_ok = (
-                    Decimal(str(self._inventory.available(None, base) or 0)) >= size
+
+                dex_base_ok = (
+                        Decimal(str(
+                            self._inventory.available(Venue.WALLET, base) or 0
+                        ))
+                        >= size
                 )
-                return quote_ok and base_ok
+
+                return cex_quote_ok and dex_base_ok
+
             else:
-                base_ok = (
-                    Decimal(str(self._inventory.available(None, base) or 0)) >= size
+                dex_quote_ok = (
+                        Decimal(str(
+                            self._inventory.available(Venue.WALLET, quote) or 0
+                        ))
+                        >= size * price * buf
                 )
-                quote_ok = (
-                    Decimal(str(self._inventory.available(None, quote) or 0))
-                    >= size * price * buf
+
+                cex_base_ok = (
+                        Decimal(str(
+                            self._inventory.available(Venue.BINANCE, base) or 0
+                        ))
+                        >= size
                 )
-                return base_ok and quote_ok
+
+                return dex_quote_ok and cex_base_ok
         except Exception as exc:
             raise RuntimeError(f"Failed to check inventory: {exc}")
 
+    # ---------------------------------------------------------------------
+
     @staticmethod
     def _normal_cdf(z: Decimal) -> Decimal:
-        import math
-        z_f = float(z)
-        val = 0.5 * math.erfc(-z_f / math.sqrt(2.0))
+        val = 0.5 * math.erfc(-float(z) / math.sqrt(2.0))
         return Decimal(str(val))

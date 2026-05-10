@@ -24,6 +24,9 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _EPS = Decimal("1E-12")
 
+PRICE_TICK = Decimal("0.0001")
+LOT_SIZE_STEP = Decimal("0.1")
+
 
 def _d(v) -> Decimal:
     return Decimal(str(v))
@@ -278,6 +281,12 @@ class Executor:
     # CEX-first flow
     # ------------------------------------------------------------------
 
+    def _quantize_price(self, price: Decimal) -> Decimal:
+        return (price / PRICE_TICK).to_integral_value() * PRICE_TICK
+
+    def _quantize_qty(self, qty: Decimal) -> Decimal:
+        return (qty / LOT_SIZE_STEP).to_integral_value() * LOT_SIZE_STEP
+
     async def _execute_cex_first(self, ctx: ExecutionContext) -> ExecutionContext:
         sig = ctx.signal
         ctx.transition(ExecutorState.LEG1_PENDING)
@@ -423,17 +432,19 @@ class Executor:
             }
 
         side = "buy" if signal.direction == Direction.BUY_CEX_SELL_DEX else "sell"
-        limit = (
+        raw_price = (
             signal.cex_price * Decimal("1.001")
             if side == "buy"
             else signal.cex_price * Decimal("0.999")
         )
+        limit_price = self._quantize_price(raw_price)
+        qty = self._quantize_qty(size)
         try:
             result = self._exchange.create_limit_ioc_order(
                 symbol=signal.pair,
                 side=side,
-                amount=float(size),
-                price=float(limit)
+                amount=float(qty),
+                price=float(limit_price)
             )
             filled = float(result["amount_filled"])
             avg_price = float(result["avg_fill_price"]) if filled > 0 else float(signal.cex_price)
